@@ -28,7 +28,7 @@ file(CONFIGURE
   ]]
   ESCAPE_QUOTES @ONLY NEWLINE_STYLE LF)
 
-add_library(SWBUniversalPlatform STATIC
+add_library(SWBUniversalPlatform
   CopyPlistFile.swift
   CopyStringsFile.swift
   CppTool.swift
@@ -42,3 +42,11 @@ target_link_libraries(SWBUniversalPlatform PUBLIC
   SWBUtil)
 target_sources(SWBUniversalPlatform PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}/resource_bundle_accessor.swift")
+
+set_target_properties(SWBUniversalPlatform PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
+
+set_property(GLOBAL APPEND PROPERTY SWIFTBUILD_EXPORTS SWBUniversalPlatform)
+
+install(TARGETS SWBUniversalPlatform
+    ARCHIVE DESTINATION "${SwiftBuild_INSTALL_LIBDIR}")
