@@ -222,7 +222,7 @@ public final class MsgPackEncoder: Encoder {
     self.endArray()
   }
 
-  fileprivate func beginMap(_ mappingCount: Int) {
+  public func beginMap(_ mappingCount: Int) {
     switch Int64(mappingCount) {
     case 0...0xf:
       bytes.append(0b1000_0000 | UInt8(mappingCount))
@@ -243,7 +243,7 @@ public final class MsgPackEncoder: Encoder {
     }
   }
 
-  fileprivate func endMap() {
+  public func endMap() {
     if enableIntegrityChecks {
         let expectedCount = _expectedElementCount.removeLast()
         let actualCount = _actualElementCount.removeLast()

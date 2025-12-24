@@ -971,6 +971,9 @@ final class OperationDelegate: BuildOperationDelegate {
         /// The buffered list of any up-to-date task which have run before the target starts. These are dispatched immediately after the target starts.
         var upToDateTaskSignatures: [BuildOperationTaskSignature] = []
 
+        /// Start timestamp for telemetry duration calculation
+        var startTimestamp: UInt64 = 0
+
         init(id: Int) {
             self.id = id
         }
@@ -1010,6 +1013,18 @@ final class OperationDelegate: BuildOperationDelegate {
     var aggregatedCounters: [BuildOperationMetrics.Counter: Int] = [:]
     var aggregatedTaskCounters: [String: [BuildOperationMetrics.TaskCounter: Int]] = [:]
 
+    /// Telemetry client for sending build events to external collector
+    private let telemetryClient: TelemetryClient? = TelemetryClient.shared
+
+    /// Build start timestamp for duration calculation
+    private var buildStartTimestamp: UInt64 = 0
+
+    /// Session ID for telemetry correlation
+    private var telemetrySessionID: String = ""
+
+    /// Number of warnings emitted
+    private var numWarnings = 0
+
     fileprivate var session: Session {
         return activeBuild.session
     }
@@ -1037,6 +1052,22 @@ final class OperationDelegate: BuildOperationDelegate {
         request.send(BuildOperationStarted(id: activeBuild.id))
         let outputCollector = BuildOutputCollector(diagnosticsDelegate: diagnosticsHandler)
         self.outputCollector = outputCollector
+
+        // Send telemetry event for build started
+        if let telemetryClient = telemetryClient {
+            telemetrySessionID = operation.uuid.uuidString
+            buildStartTimestamp = BuildStartedEvent.currentTimestamp()
+            let targetCount = operation.request.buildTargets.count
+            let configuration = operation.request.parameters.configuration ?? "Unknown"
+            let action = operation.request.buildCommand.description
+            telemetryClient.buildStarted(
+                sessionID: telemetrySessionID,
+                configuration: configuration,
+                targetCount: targetCount,
+                action: action
+            )
+        }
+
         return outputCollector
     }
 
@@ -1054,6 +1085,29 @@ final class OperationDelegate: BuildOperationDelegate {
         }
         let realStatus = status ?? taskCompletionBasedStatus
         activeBuild.completeBuild(status: realStatus, metrics: metrics)
+
+        // Send telemetry event for build completed
+        if let telemetryClient = telemetryClient {
+            let currentTimestamp = BuildCompletedEvent.currentTimestamp()
+            let durationNanos = currentTimestamp - buildStartTimestamp
+            let result: BuildResultStatus
+            switch realStatus {
+            case .succeeded:
+                result = .succeeded
+            case .failed:
+                result = .failed
+            case .cancelled:
+                result = .cancelled
+            }
+            telemetryClient.buildCompleted(
+                sessionID: telemetrySessionID,
+                result: result,
+                durationNanos: durationNanos,
+                errorCount: numErrors,
+                warningCount: numWarnings
+            )
+        }
+
         return realStatus
     }
 
@@ -1110,11 +1164,21 @@ final class OperationDelegate: BuildOperationDelegate {
         // Mark the target as started, if necessary.
         if !targetInfo.hasStarted {
             targetInfo.hasStarted = true
+            targetInfo.startTimestamp = TargetStartedEvent.currentTimestamp()
             // Flush any pending up-to-date task notifications.
             for signature in targetInfo.upToDateTaskSignatures {
                 request.send(BuildOperationTaskUpToDate(signature: signature, targetID: targetInfo.id))
             }
             targetInfo.upToDateTaskSignatures.removeAll(keepingCapacity: false)
+
+            // Send telemetry event for target started
+            if let telemetryClient = telemetryClient {
+                telemetryClient.targetStarted(
+                    sessionID: telemetrySessionID,
+                    targetName: target.name,
+                    targetGUID: configuredTarget.target.guid
+                )
+            }
         }
 
         diagnosticsHandler.emitDeferredTargetDiagnostics(for: configuredTarget, withID: targetID)
@@ -1125,6 +1189,21 @@ final class OperationDelegate: BuildOperationDelegate {
         let targetInfo = activeTargets.withLock { activeTargets in activeTargets.removeValue(forKey: configuredTarget.guid)! }
 
         guard !skipCommandLevelInformation else { return }
+
+        // Send telemetry event for target completed
+        if let telemetryClient = telemetryClient, targetInfo.hasStarted {
+            let currentTimestamp = TargetCompletedEvent.currentTimestamp()
+            let durationNanos = currentTimestamp - targetInfo.startTimestamp
+            // Use build status for target result (simplified - actual status depends on tasks)
+            let result: BuildResultStatus = taskCompletionBasedStatus == .succeeded ? .succeeded : .failed
+            telemetryClient.targetCompleted(
+                sessionID: telemetrySessionID,
+                targetName: configuredTarget.target.name,
+                targetGUID: configuredTarget.target.guid,
+                result: result,
+                durationNanos: durationNanos
+            )
+        }
 
         // Send the appropriate finalization message.
         if targetInfo.hasStarted {
@@ -1179,6 +1258,17 @@ final class OperationDelegate: BuildOperationDelegate {
 
         // Ignore hidden tasks for output purposes.
         guard task.showInLog else { return }
+
+        // Send telemetry event for task up-to-date
+        if let telemetryClient = telemetryClient {
+            let taskSpec = task.type as? Spec
+            telemetryClient.taskUpToDate(
+                sessionID: telemetrySessionID,
+                taskSignature: task.identifier.rawValue,
+                taskType: taskSpec?.name ?? "unknown",
+                targetName: task.forTarget?.target.name
+            )
+        }
 
         guard let target = task.forTarget else {
             request.send(BuildOperationTaskUpToDate(signature: .taskIdentifier(ByteString(encodingAsUTF8: task.identifier.rawValue)), targetID: nil))
@@ -1244,6 +1334,17 @@ final class OperationDelegate: BuildOperationDelegate {
         let info = BuildOperationTaskInfo(taskName: taskSpec?.name ?? "", signature: .taskIdentifier(ByteString(encodingAsUTF8: task.identifier.rawValue)), ruleInfo: task.ruleInfo.quotedDescription, executionDescription: (task.execDescription ?? task.ruleInfo.quotedDescription), commandLineDisplayString: task.showCommandLineInLog ? commandLineDisplayString(task.commandLine.map(\.asByteString), additionalOutput: task.additionalOutput, workingDirectory: task.workingDirectory, environment: environmentToShow, dependencyInfo: dependencyInfo) : nil, interestingPath: interestingPath, serializedDiagnosticsPaths: task.type.serializedDiagnosticsPaths(task, operation.requestContext.fs))
 
         request.send(BuildOperationTaskStarted(id: taskID, targetID: targetID, parentID: nil, info: info))
+
+        // Send telemetry event for task started
+        if let telemetryClient = telemetryClient {
+            telemetryClient.taskStarted(
+                sessionID: telemetrySessionID,
+                taskSignature: task.identifier.rawValue,
+                taskType: taskSpec?.name ?? "unknown",
+                targetName: task.forTarget?.target.name,
+                ruleInfo: task.ruleInfo.quotedDescription
+            )
+        }
 
         // Create the output parser, if used.
         //
@@ -1334,6 +1435,38 @@ final class OperationDelegate: BuildOperationDelegate {
         self.aggregatedCounters.merge(delegate.counters) { (a, b) in a+b }
         if !delegate.taskCounters.isEmpty {
             self.aggregatedTaskCounters[task.ruleInfo[0], default: [:]].merge(delegate.taskCounters) { (a, b) in a+b }
+        }
+
+        // Send telemetry event for task completed
+        if let telemetryClient = telemetryClient {
+            let telemetryResult: TaskResultStatus
+            switch status {
+            case .succeeded:
+                telemetryResult = .succeeded
+            case .failed:
+                telemetryResult = .failed
+            case .cancelled:
+                telemetryResult = .cancelled
+            }
+
+            // Get exit code if available
+            var exitCode: Int? = nil
+            if case let .exit(exitStatus, _) = delegate.result {
+                switch exitStatus {
+                case let .exit(code):
+                    exitCode = Int(code)
+                case let .uncaughtSignal(signal):
+                    exitCode = Int(signal)
+                }
+            }
+
+            telemetryClient.taskCompleted(
+                sessionID: telemetrySessionID,
+                taskSignature: task.identifier.rawValue,
+                result: telemetryResult,
+                durationNanos: UInt64(duration.nanoseconds),
+                exitCode: exitCode
+            )
         }
 
         request.send(BuildOperationTaskEnded(id: taskID, signature: .taskIdentifier(ByteString(encodingAsUTF8: taskIdentifier.rawValue)), status: status, signalled: status == .cancelled, metrics: metrics))

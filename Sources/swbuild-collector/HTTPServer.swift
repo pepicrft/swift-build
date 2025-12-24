@@ -1,0 +1,1063 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the Swift open source project
+//
+// Copyright (c) 2025 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Represents a detected coding agent
+struct CodingAgent {
+    let id: String
+    let name: String
+    let command: String
+
+    func toJSON() -> [String: Any] {
+        return [
+            "id": id,
+            "name": name,
+            "command": command
+        ]
+    }
+}
+
+/// Simple HTTP server for the web UI
+final class HTTPServer: @unchecked Sendable {
+    let port: Int
+    let buildStore: BuildStore
+
+    private var serverFD: Int32 = -1
+    private var isRunning = false
+
+    /// Cached list of detected agents
+    private var detectedAgents: [CodingAgent] = []
+
+    init(port: Int, buildStore: BuildStore) {
+        self.port = port
+        self.buildStore = buildStore
+        self.detectedAgents = Self.detectAgents()
+    }
+
+    /// Detect available coding agents on the system
+    private static func detectAgents() -> [CodingAgent] {
+        var agents: [CodingAgent] = []
+
+        let agentDefinitions: [(id: String, name: String, commands: [String])] = [
+            ("claude", "Claude Code", ["claude"]),
+            ("codex", "OpenAI Codex", ["codex"]),
+            ("cursor", "Cursor", ["cursor"]),
+            ("copilot", "GitHub Copilot", ["gh copilot"]),
+            ("aider", "Aider", ["aider"]),
+            ("cody", "Sourcegraph Cody", ["cody"]),
+        ]
+
+        for (id, name, commands) in agentDefinitions {
+            for command in commands {
+                if isCommandAvailable(command.split(separator: " ").first.map(String.init) ?? command) {
+                    agents.append(CodingAgent(id: id, name: name, command: command))
+                    break
+                }
+            }
+        }
+
+        return agents
+    }
+
+    /// Check if a command is available in PATH
+    private static func isCommandAvailable(_ command: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    func start() async throws {
+        // Create socket
+        serverFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard serverFD >= 0 else {
+            throw HTTPError.socketCreationFailed(errno: errno)
+        }
+
+        // Set socket options
+        var reuseAddr: Int32 = 1
+        setsockopt(serverFD, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, socklen_t(MemoryLayout<Int32>.size))
+
+        // Bind to address
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                bind(serverFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        guard bindResult == 0 else {
+            close(serverFD)
+            throw HTTPError.bindFailed(errno: errno)
+        }
+
+        // Listen for connections
+        guard listen(serverFD, 50) == 0 else {
+            close(serverFD)
+            throw HTTPError.listenFailed(errno: errno)
+        }
+
+        isRunning = true
+        print("HTTP server listening on http://localhost:\(port)")
+
+        // Accept connections
+        while isRunning {
+            let clientFD = accept(serverFD, nil, nil)
+            if clientFD >= 0 {
+                Task {
+                    await handleClient(fd: clientFD)
+                }
+            }
+        }
+    }
+
+    func stop() {
+        isRunning = false
+        if serverFD >= 0 {
+            close(serverFD)
+            serverFD = -1
+        }
+    }
+
+    private func handleClient(fd: Int32) async {
+        defer { close(fd) }
+
+        // Read request
+        var buffer = [UInt8](repeating: 0, count: 8192)
+        let bytesRead = recv(fd, &buffer, buffer.count - 1, 0)
+
+        guard bytesRead > 0 else { return }
+
+        let requestString = String(decoding: buffer[0..<bytesRead], as: UTF8.self)
+        let lines = requestString.split(separator: "\r\n")
+
+        guard let firstLine = lines.first else { return }
+        let parts = firstLine.split(separator: " ")
+
+        guard parts.count >= 2 else { return }
+
+        let method = String(parts[0])
+        let path = String(parts[1])
+
+        // Route request
+        let response: HTTPResponse
+        if method == "GET" {
+            response = await handleGET(path: path)
+        } else {
+            response = HTTPResponse(status: 405, contentType: "text/plain", body: "Method Not Allowed")
+        }
+
+        // Send response
+        let responseString = response.toString()
+        _ = responseString.withCString { ptr in
+            send(fd, ptr, strlen(ptr), 0)
+        }
+    }
+
+    private func handleGET(path: String) async -> HTTPResponse {
+        switch path {
+        case "/":
+            return HTTPResponse(status: 200, contentType: "text/html", body: generateHTML())
+
+        case "/api/builds":
+            let builds = await buildStore.getAllBuilds()
+            return jsonResponse(builds.map { $0.toJSON() })
+
+        case "/api/builds/current":
+            if let build = await buildStore.getCurrentBuild() {
+                return jsonResponse(build.toJSON())
+            } else {
+                return jsonResponse(nil as [String: Any]?)
+            }
+
+        case let p where p.hasPrefix("/api/builds/"):
+            let sessionID = String(p.dropFirst("/api/builds/".count))
+            if let build = await buildStore.getBuild(sessionID: sessionID) {
+                return jsonResponse(build.toJSON())
+            } else {
+                return HTTPResponse(status: 404, contentType: "application/json", body: "{\"error\": \"Build not found\"}")
+            }
+
+        case "/api/events":
+            // Server-Sent Events endpoint for real-time updates
+            return HTTPResponse(
+                status: 200,
+                contentType: "text/event-stream",
+                headers: ["Cache-Control": "no-cache", "Connection": "keep-alive"],
+                body: "event: ping\ndata: connected\n\n"
+            )
+
+        case "/api/agents":
+            return jsonResponse(detectedAgents.map { $0.toJSON() })
+
+        default:
+            return HTTPResponse(status: 404, contentType: "text/plain", body: "Not Found")
+        }
+    }
+
+    private func jsonResponse(_ data: Any?) -> HTTPResponse {
+        guard let data = data else {
+            return HTTPResponse(status: 200, contentType: "application/json", body: "null")
+        }
+
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys])
+            let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
+            return HTTPResponse(status: 200, contentType: "application/json", body: jsonString)
+        } catch {
+            return HTTPResponse(status: 500, contentType: "application/json", body: "{\"error\": \"JSON serialization failed\"}")
+        }
+    }
+
+    private func generateHTML() -> String {
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Swift Build Monitor</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+            <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+            <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+            <script>
+                tailwind.config = {
+                    theme: {
+                        extend: {
+                            colors: {
+                                background: 'hsl(0 0% 100%)',
+                                foreground: 'hsl(240 10% 3.9%)',
+                                card: { DEFAULT: 'hsl(0 0% 100%)', foreground: 'hsl(240 10% 3.9%)' },
+                                popover: { DEFAULT: 'hsl(0 0% 100%)', foreground: 'hsl(240 10% 3.9%)' },
+                                primary: { DEFAULT: 'hsl(240 5.9% 10%)', foreground: 'hsl(0 0% 98%)' },
+                                secondary: { DEFAULT: 'hsl(240 4.8% 95.9%)', foreground: 'hsl(240 5.9% 10%)' },
+                                muted: { DEFAULT: 'hsl(240 4.8% 95.9%)', foreground: 'hsl(240 3.8% 46.1%)' },
+                                accent: { DEFAULT: 'hsl(240 4.8% 95.9%)', foreground: 'hsl(240 5.9% 10%)' },
+                                destructive: { DEFAULT: 'hsl(0 84.2% 60.2%)', foreground: 'hsl(0 0% 98%)' },
+                                border: 'hsl(240 5.9% 90%)',
+                                input: 'hsl(240 5.9% 90%)',
+                                ring: 'hsl(240 5.9% 10%)',
+                                chart: {
+                                    '1': 'hsl(220 70% 50%)',
+                                    '2': 'hsl(160 60% 45%)',
+                                    '3': 'hsl(30 80% 55%)',
+                                    '4': 'hsl(280 65% 60%)',
+                                    '5': 'hsl(340 75% 55%)',
+                                },
+                            },
+                            borderRadius: { lg: '0.5rem', md: 'calc(0.5rem - 2px)', sm: 'calc(0.5rem - 4px)' },
+                        }
+                    }
+                }
+            </script>
+            <style>
+                @keyframes pulse-slow { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+                .animate-pulse-slow { animation: pulse-slow 2s ease-in-out infinite; }
+                @keyframes slide-down { from { height: 0; } to { height: var(--radix-collapsible-content-height); } }
+                @keyframes slide-up { from { height: var(--radix-collapsible-content-height); } to { height: 0; } }
+                .collapsible-content[data-state="open"] { animation: slide-down 200ms ease-out; }
+                .collapsible-content[data-state="closed"] { animation: slide-up 200ms ease-out; }
+                .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+                .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+                .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(240 5.9% 85%); border-radius: 3px; }
+                .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(240 5.9% 75%); }
+            </style>
+        </head>
+        <body class="bg-background text-foreground min-h-screen antialiased">
+            <div id="root"></div>
+            <script type="text/babel">
+                const { useState, useEffect, useCallback, useMemo } = React;
+
+                // Utilities
+                const formatDuration = (seconds) => {
+                    if (!seconds && seconds !== 0) return '-';
+                    if (seconds < 0.001) return '<1ms';
+                    if (seconds < 1) return Math.round(seconds * 1000) + 'ms';
+                    if (seconds < 60) return seconds.toFixed(1) + 's';
+                    const mins = Math.floor(seconds / 60);
+                    const secs = Math.round(seconds % 60);
+                    return mins + 'm ' + secs + 's';
+                };
+
+                const formatTime = (isoString) => {
+                    if (!isoString) return '-';
+                    return new Date(isoString).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                };
+
+                const formatTimeShort = (isoString) => {
+                    if (!isoString) return '-';
+                    return new Date(isoString).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                };
+
+                // Human-readable rule name mapping
+                const ruleNameMap = {
+                    'WriteAuxiliaryFile': 'Write Support File',
+                    'MkDir': 'Create Directory',
+                    'CreateBuildDirectory': 'Create Build Directory',
+                    'CompileC': 'Compile C/Objective-C',
+                    'CompileSwift': 'Compile Swift',
+                    'CompileSwiftSources': 'Compile Swift Sources',
+                    'SwiftDriver': 'Swift Driver',
+                    'SwiftCompile': 'Swift Compile',
+                    'SwiftEmitModule': 'Emit Swift Module',
+                    'SwiftMergeGeneratedHeaders': 'Merge Swift Headers',
+                    'Ld': 'Link Binary',
+                    'Libtool': 'Create Static Library',
+                    'CpHeader': 'Copy Header',
+                    'Copy': 'Copy File',
+                    'CopySwiftLibs': 'Copy Swift Libraries',
+                    'CopyPNGFile': 'Copy PNG',
+                    'CopyStringsFile': 'Copy Strings',
+                    'CpResource': 'Copy Resource',
+                    'ProcessInfoPlistFile': 'Process Info.plist',
+                    'ProcessProductPackaging': 'Process Packaging',
+                    'ProcessProductPackagingDER': 'Process DER Packaging',
+                    'CodeSign': 'Code Sign',
+                    'ValidateEmbeddedBinary': 'Validate Embedded Binary',
+                    'Touch': 'Update Timestamp',
+                    'RegisterExecutionPolicyException': 'Register Security Exception',
+                    'RegisterWithLaunchServices': 'Register with Launch Services',
+                    'ExtractAppIntentsMetadata': 'Extract App Intents',
+                    'AppIntentsSSUTraining': 'Train App Intents',
+                    'LinkAssetCatalog': 'Link Asset Catalog',
+                    'LinkAssetCatalogSignature': 'Sign Asset Catalog',
+                    'CompileAssetCatalog': 'Compile Assets',
+                    'CompileStoryboard': 'Compile Storyboard',
+                    'CompileXIB': 'Compile XIB',
+                    'LinkStoryboards': 'Link Storyboards',
+                    'ProcessXCFramework': 'Process XCFramework',
+                    'GenerateDSYMFile': 'Generate Debug Symbols',
+                    'Strip': 'Strip Binary',
+                    'SetOwnerAndGroup': 'Set Permissions',
+                    'SetMode': 'Set File Mode',
+                    'Ditto': 'Copy with Ditto',
+                    'PBXCp': 'Copy Files',
+                    'PhaseScriptExecution': 'Run Script',
+                    'Gate': 'Build Gate',
+                    'ClangStatCache': 'Clang Stats Cache',
+                    'SwiftExplicitDependencyCompileModuleFromInterface': 'Compile Swift Module Interface',
+                    'SwiftExplicitDependencyGeneratePcm': 'Generate PCM',
+                    'WriteFile': 'Write',
+                    'Copy': 'Copy',
+                    'CpResource': 'Copy Resource',
+                    'MkDir': 'Create Directory',
+                    'Mkdir': 'Create Directory',
+                    'CreateBuildDirectory': 'Create Build Directory',
+                    'CopyAndPreserveArchs': 'Copy Framework',
+                    'CompileAssetCatalogVariant': 'Compile Assets',
+                    'ProcessInfoPlistFile': 'Process Info.plist',
+                    'ProcessProductPackaging': 'Process Entitlements',
+                    'ProcessProductPackagingDER': 'Process Entitlements DER',
+                    'SwiftCompile': 'Swift Compile',
+                    'SwiftDriver': 'Swift Driver',
+                    'SwiftEmitModule': 'Swift Emit Module',
+                    'SwiftMergeGeneratedHeaders': 'Swift Merge Headers',
+                    'CpHeader': 'Copy Header',
+                };
+
+                const getReadableRuleName = (ruleInfo, taskType) => {
+                    if (!ruleInfo && !taskType) return 'Task';
+                    const parts = ruleInfo ? ruleInfo.split(' ') : [];
+                    const ruleName = parts[0] || taskType;
+                    const readableName = ruleNameMap[ruleName] || ruleName || 'Task';
+
+                    // For generic tasks, try to extract a meaningful filename
+                    const genericRules = [
+                        'WriteFile', 'WriteAuxiliaryFile', 'Copy', 'CpResource', 'Touch',
+                        'MkDir', 'Mkdir', 'CreateBuildDirectory', 'PBXCp', 'Ditto',
+                        'CopyPlistFile', 'CopyStringsFile', 'CopyPNGFile', 'CpHeader',
+                        'CopyAndPreserveArchs', 'CompileAssetCatalogVariant',
+                        'LinkAssetCatalog', 'LinkAssetCatalogSignature',
+                        'ProcessInfoPlistFile', 'RegisterExecutionPolicyException',
+                        'CompileAssetCatalog', 'ProcessProductPackaging',
+                        'ProcessProductPackagingDER', 'CodeSign', 'ValidateEmbeddedBinary',
+                        'CompileXIB', 'CompileStoryboard', 'LinkStoryboards',
+                        'CompileC', 'CompileSwift', 'CompileSwiftSources',
+                        'Ld', 'Libtool', 'GenerateDSYMFile', 'Strip',
+                        'SwiftCompile', 'SwiftDriver', 'SwiftEmitModule', 'SwiftMergeGeneratedHeaders'
+                    ];
+                    if (genericRules.includes(ruleName)) {
+                        // Special handling for SwiftCompile - extract first .swift file from "Compiling X.swift, Y.swift"
+                        if (ruleName === 'SwiftCompile') {
+                            const match = ruleInfo.match(/Compiling[\\\\]?\\s+([^,\\\\]+\\.swift)/);
+                            if (match) {
+                                return `${readableName}: ${match[1]}`;
+                            }
+                        }
+                        // Special handling for SwiftDriver - extract module name
+                        if (ruleName === 'SwiftDriver') {
+                            // Format: SwiftDriver ModuleName normal arm64 ...
+                            if (parts[1] && !parts[1].includes('/')) {
+                                return `${readableName}: ${parts[1]}`;
+                            }
+                        }
+                        // Special handling for SwiftEmitModule
+                        if (ruleName === 'SwiftEmitModule') {
+                            const match = ruleInfo.match(/module\\s+for[\\\\]?\\s+(\\w+)/i);
+                            if (match) {
+                                return `${readableName}: ${match[1]}`;
+                            }
+                        }
+                        // Find the first path in ruleInfo (handle escaped spaces)
+                        const pathPart = parts.slice(1).find(p => p.includes('/'));
+                        if (pathPart) {
+                            // Remove trailing backslash from escaped spaces and get filename
+                            const fileName = pathPart.split('/').pop()?.replace(/[\\\\]+$/, '');
+                            if (fileName) {
+                                return `${readableName}: ${fileName}`;
+                            }
+                        }
+                    }
+
+                    return readableName;
+                };
+
+                // Icons
+                const ChevronRight = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                );
+
+                const ChevronDown = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                );
+
+                const Clock = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" />
+                    </svg>
+                );
+
+                const CheckCircle = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                );
+
+                const XCircle = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                );
+
+                const Loader = ({ className }) => (
+                    <svg className={className + ' animate-spin'} fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                );
+
+                const Package = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                    </svg>
+                );
+
+                const Layers = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                    </svg>
+                );
+
+                // Badge Component
+                const Badge = ({ children, variant = 'default', className = '' }) => {
+                    const variants = {
+                        default: 'bg-primary text-primary-foreground',
+                        secondary: 'bg-secondary text-secondary-foreground border-border',
+                        destructive: 'bg-red-100 text-red-700 border-red-200',
+                        outline: 'border border-border bg-transparent',
+                        success: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+                        warning: 'bg-amber-100 text-amber-700 border-amber-200',
+                        info: 'bg-blue-100 text-blue-700 border-blue-200',
+                    };
+                    return (
+                        <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium transition-colors ${variants[variant]} ${className}`}>
+                            {children}
+                        </span>
+                    );
+                };
+
+                // Status Badge with icon
+                const StatusBadge = ({ status, size = 'default' }) => {
+                    const config = {
+                        running: { variant: 'info', icon: Loader, label: 'Building' },
+                        succeeded: { variant: 'success', icon: CheckCircle, label: 'Succeeded' },
+                        failed: { variant: 'destructive', icon: XCircle, label: 'Failed' },
+                        cancelled: { variant: 'secondary', icon: XCircle, label: 'Cancelled' },
+                    };
+                    const { variant, icon: Icon, label } = config[status] || config.cancelled;
+                    const sizeClass = size === 'sm' ? 'text-[10px] px-1.5 py-0' : '';
+                    return (
+                        <Badge variant={variant} className={`gap-1 ${status === 'running' ? 'animate-pulse-slow' : ''} ${sizeClass}`}>
+                            <Icon className={size === 'sm' ? 'h-2.5 w-2.5' : 'h-3 w-3'} />
+                            {label}
+                        </Badge>
+                    );
+                };
+
+                // Progress Bar
+                const Progress = ({ value, className = '' }) => (
+                    <div className={`relative h-1.5 w-full overflow-hidden rounded-full bg-secondary ${className}`}>
+                        <div className="h-full bg-primary transition-all duration-300 ease-out" style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
+                    </div>
+                );
+
+                // Card Components
+                const Card = ({ children, className = '' }) => (
+                    <div className={`rounded-lg border border-border bg-card text-card-foreground shadow-sm ${className}`}>{children}</div>
+                );
+                const CardHeader = ({ children, className = '' }) => (
+                    <div className={`flex flex-col space-y-1.5 p-4 ${className}`}>{children}</div>
+                );
+                const CardTitle = ({ children, className = '' }) => (
+                    <h3 className={`font-semibold leading-none tracking-tight ${className}`}>{children}</h3>
+                );
+                const CardDescription = ({ children, className = '' }) => (
+                    <p className={`text-sm text-muted-foreground ${className}`}>{children}</p>
+                );
+                const CardContent = ({ children, className = '' }) => (
+                    <div className={`p-4 pt-0 ${className}`}>{children}</div>
+                );
+
+                // Collapsible Task Detail
+                const TaskDetail = ({ task, isExpanded }) => {
+                    if (!isExpanded) return null;
+                    const ruleInfo = task.ruleInfo || '';
+                    const filePath = ruleInfo.includes('/') ? ruleInfo.split(' ').find(s => s.includes('/')) : null;
+
+                    return (
+                        <div className="mt-2 p-3 rounded-md bg-secondary text-xs space-y-2 font-mono overflow-hidden">
+                            {task.type && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Type:</span>
+                                    <span className="text-foreground break-all">{task.type}</span>
+                                </div>
+                            )}
+                            {ruleInfo && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Rule:</span>
+                                    <span className="text-foreground break-all">{ruleInfo.split(' ')[0]}</span>
+                                </div>
+                            )}
+                            {filePath && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">File:</span>
+                                    <span className="text-blue-600 break-all">{filePath.split('/').slice(-2).join('/')}</span>
+                                </div>
+                            )}
+                            {task.startTime && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Started:</span>
+                                    <span className="text-foreground">{formatTime(task.startTime)}</span>
+                                </div>
+                            )}
+                            {task.durationSeconds != null && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Duration:</span>
+                                    <span className="text-foreground">{formatDuration(task.durationSeconds)}</span>
+                                </div>
+                            )}
+                            {task.exitCode != null && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Exit:</span>
+                                    <span className={task.exitCode === 0 ? 'text-emerald-600' : 'text-red-600'}>{task.exitCode}</span>
+                                </div>
+                            )}
+                            {task.signature && (
+                                <div className="flex gap-2">
+                                    <span className="text-muted-foreground shrink-0">Sig:</span>
+                                    <span className="text-muted-foreground truncate">{task.signature.substring(0, 50)}...</span>
+                                </div>
+                            )}
+                        </div>
+                    );
+                };
+
+                // Task Item in Timeline
+                const TaskItem = ({ task, showDetail = false }) => {
+                    const [expanded, setExpanded] = useState(false);
+                    const readableName = getReadableRuleName(task.ruleInfo, task.type);
+
+                    return (
+                        <div className="group">
+                            <button
+                                onClick={() => setExpanded(!expanded)}
+                                className="w-full flex items-center gap-2 py-1.5 px-2 rounded hover:bg-secondary transition-colors text-left"
+                            >
+                                <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                    task.status === 'succeeded' ? 'bg-emerald-500' :
+                                    task.status === 'failed' ? 'bg-red-500' :
+                                    task.status === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground'
+                                }`} />
+                                <span className="text-xs text-muted-foreground truncate flex-1">{readableName}</span>
+                                {task.durationSeconds != null && (
+                                    <span className="text-[10px] text-muted-foreground tabular-nums">{formatDuration(task.durationSeconds)}</span>
+                                )}
+                                <ChevronRight className={`h-3 w-3 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                            </button>
+                            <TaskDetail task={task} isExpanded={expanded} />
+                        </div>
+                    );
+                };
+
+                // Timeline Target Item
+                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast }) => {
+                    const [expanded, setExpanded] = useState(false);
+                    const [showAllTasks, setShowAllTasks] = useState(false);
+
+                    // Calculate timeline position
+                    const startOffset = buildStartTime && target.startTime
+                        ? (new Date(target.startTime) - new Date(buildStartTime)) / 1000
+                        : 0;
+                    const duration = target.durationSeconds || 0;
+                    const leftPercent = buildDuration > 0 ? (startOffset / buildDuration) * 100 : 0;
+                    const widthPercent = buildDuration > 0 ? (duration / buildDuration) * 100 : 0;
+
+                    const completedTasks = target.tasks?.filter(t => t.status === 'succeeded').length || 0;
+                    const failedTasks = target.tasks?.filter(t => t.status === 'failed').length || 0;
+                    const runningTasks = target.tasks?.filter(t => t.status === 'running').length || 0;
+                    const totalTasks = target.taskCount || target.tasks?.length || 0;
+
+                    const visibleTasks = showAllTasks ? target.tasks : target.tasks?.slice(0, 5);
+                    const hiddenCount = (target.tasks?.length || 0) - 5;
+
+                    return (
+                        <div className="relative">
+                            {/* Timeline connector */}
+                            {!isFirst && (
+                                <div className="absolute left-[11px] -top-3 w-0.5 h-3 bg-border" />
+                            )}
+
+                            <div className="flex gap-3">
+                                {/* Timeline dot */}
+                                <div className="relative flex flex-col items-center">
+                                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                                        target.status === 'succeeded' ? 'border-emerald-500 bg-emerald-100' :
+                                        target.status === 'failed' ? 'border-red-500 bg-red-100' :
+                                        target.status === 'running' ? 'border-blue-500 bg-blue-100' : 'border-border bg-secondary'
+                                    }`}>
+                                        {target.status === 'succeeded' && <CheckCircle className="h-3 w-3 text-emerald-600" />}
+                                        {target.status === 'failed' && <XCircle className="h-3 w-3 text-red-600" />}
+                                        {target.status === 'running' && <Loader className="h-3 w-3 text-blue-600" />}
+                                    </div>
+                                    {!isLast && (
+                                        <div className="w-0.5 flex-1 bg-border mt-1" />
+                                    )}
+                                </div>
+
+                                {/* Content */}
+                                <div className="flex-1 pb-4">
+                                    <Card className="overflow-hidden">
+                                        {/* Header - always visible */}
+                                        <button
+                                            onClick={() => setExpanded(!expanded)}
+                                            className="w-full text-left"
+                                        >
+                                            <CardHeader className="py-3 hover:bg-secondary/30 transition-colors">
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <Package className="h-4 w-4 text-muted-foreground shrink-0" />
+                                                        <CardTitle className="text-sm truncate">{target.name}</CardTitle>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <StatusBadge status={target.status} size="sm" />
+                                                        <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                                                    </div>
+                                                </div>
+
+                                                {/* Mini stats row */}
+                                                <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                                                    <span className="flex items-center gap-1">
+                                                        <Layers className="h-3 w-3" />
+                                                        {completedTasks}/{totalTasks} tasks
+                                                    </span>
+                                                    {target.durationSeconds != null && (
+                                                        <span className="flex items-center gap-1">
+                                                            <Clock className="h-3 w-3" />
+                                                            {formatDuration(target.durationSeconds)}
+                                                        </span>
+                                                    )}
+                                                    {failedTasks > 0 && (
+                                                        <span className="text-red-600">{failedTasks} failed</span>
+                                                    )}
+                                                    {runningTasks > 0 && (
+                                                        <span className="text-blue-600">{runningTasks} running</span>
+                                                    )}
+                                                </div>
+
+                                                {/* Progress bar */}
+                                                <div className="mt-2 h-1.5 bg-secondary rounded-full overflow-hidden">
+                                                    <div
+                                                        className={`h-full rounded-full transition-all duration-300 ${
+                                                            target.status === 'succeeded' ? 'bg-emerald-500' :
+                                                            target.status === 'failed' ? 'bg-red-500' :
+                                                            target.status === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground'
+                                                        }`}
+                                                        style={{ width: target.status === 'running' ? '100%' : (target.status === 'succeeded' || target.status === 'failed') ? '100%' : '0%' }}
+                                                    />
+                                                </div>
+                                            </CardHeader>
+                                        </button>
+
+                                        {/* Expanded content */}
+                                        {expanded && target.tasks && target.tasks.length > 0 && (
+                                            <CardContent className="border-t border-border pt-3">
+                                                <div className="space-y-1 max-h-80 overflow-y-auto scrollbar-thin">
+                                                    {visibleTasks?.map((task, i) => (
+                                                        <TaskItem key={task.signature || i} task={task} />
+                                                    ))}
+                                                </div>
+                                                {!showAllTasks && hiddenCount > 0 && (
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setShowAllTasks(true); }}
+                                                        className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                                    >
+                                                        Show {hiddenCount} more tasks...
+                                                    </button>
+                                                )}
+                                                {showAllTasks && hiddenCount > 0 && (
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setShowAllTasks(false); }}
+                                                        className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                                    >
+                                                        Show less
+                                                    </button>
+                                                )}
+                                            </CardContent>
+                                        )}
+                                    </Card>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                };
+
+                // Main Build View
+                const BuildView = ({ build }) => {
+                    if (!build) {
+                        return (
+                            <Card className="p-8">
+                                <div className="flex flex-col items-center justify-center text-center">
+                                    <div className="w-16 h-16 rounded-full bg-secondary flex items-center justify-center mb-4">
+                                        <Package className="h-8 w-8 text-muted-foreground" />
+                                    </div>
+                                    <h2 className="text-lg font-semibold">No Active Build</h2>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                        Start a build to see live progress here
+                                    </p>
+                                </div>
+                            </Card>
+                        );
+                    }
+
+                    const progress = build.totalTaskCount > 0
+                        ? (build.completedTaskCount / build.totalTaskCount) * 100
+                        : 0;
+
+                    // Sort targets: running first, then by start time
+                    const sortedTargets = useMemo(() => {
+                        if (!build.targets) return [];
+                        return [...build.targets].sort((a, b) => {
+                            // Running targets first
+                            if (a.status === 'running' && b.status !== 'running') return -1;
+                            if (b.status === 'running' && a.status !== 'running') return 1;
+                            // Then by start time
+                            if (!a.startTime) return 1;
+                            if (!b.startTime) return -1;
+                            return new Date(a.startTime) - new Date(b.startTime);
+                        });
+                    }, [build.targets]);
+
+                    return (
+                        <div className="space-y-4">
+                            {/* Header Card */}
+                            <Card>
+                                <CardHeader>
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <CardTitle className="text-xl">{build.configuration} Build</CardTitle>
+                                            <CardDescription className="mt-1">
+                                                {build.action} started at {formatTime(build.startTime)}
+                                                {build.endTime && ` - completed at ${formatTime(build.endTime)}`}
+                                            </CardDescription>
+                                        </div>
+                                        <StatusBadge status={build.status} />
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    {/* Progress */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between text-sm">
+                                            <span className="text-muted-foreground">Progress</span>
+                                            <span className="font-medium tabular-nums">
+                                                {build.completedTaskCount} / {build.totalTaskCount} tasks
+                                            </span>
+                                        </div>
+                                        <Progress value={progress} />
+                                    </div>
+
+                                    {/* Stats Grid */}
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+                                        <div className="p-3 rounded-lg bg-secondary/50 text-center">
+                                            <div className="text-2xl font-bold tabular-nums">{build.completedTargetCount || 0}/{build.targetCount || 0}</div>
+                                            <div className="text-xs text-muted-foreground">Targets</div>
+                                        </div>
+                                        <div className="p-3 rounded-lg bg-secondary/50 text-center">
+                                            <div className="text-2xl font-bold tabular-nums">{build.runningTaskCount || 0}</div>
+                                            <div className="text-xs text-muted-foreground">Running</div>
+                                        </div>
+                                        <div className="p-3 rounded-lg bg-secondary/50 text-center">
+                                            <div className="text-2xl font-bold tabular-nums">{formatDuration(build.durationSeconds)}</div>
+                                            <div className="text-xs text-muted-foreground">Duration</div>
+                                        </div>
+                                        <div className="p-3 rounded-lg bg-secondary/50 text-center">
+                                            <div className={`text-2xl font-bold tabular-nums ${build.errorCount > 0 ? 'text-red-400' : ''}`}>
+                                                {build.errorCount || 0}
+                                            </div>
+                                            <div className="text-xs text-muted-foreground">Errors</div>
+                                        </div>
+                                    </div>
+                                </CardContent>
+                            </Card>
+
+                            {/* Timeline */}
+                            {sortedTargets.length > 0 && (
+                                <Card>
+                                    <CardHeader>
+                                        <CardTitle className="text-base">Build Timeline</CardTitle>
+                                        <CardDescription>
+                                            {sortedTargets.length} targets in dependency order
+                                        </CardDescription>
+                                    </CardHeader>
+                                    <CardContent>
+                                        <div className="space-y-0">
+                                            {sortedTargets.map((target, i) => (
+                                                <TimelineTarget
+                                                    key={target.id || target.name}
+                                                    target={target}
+                                                    buildStartTime={build.startTime}
+                                                    buildDuration={build.durationSeconds}
+                                                    isFirst={i === 0}
+                                                    isLast={i === sortedTargets.length - 1}
+                                                />
+                                            ))}
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            )}
+                        </div>
+                    );
+                };
+
+                // App
+                function App() {
+                    const [currentBuild, setCurrentBuild] = useState(null);
+                    const [builds, setBuilds] = useState([]);
+                    const [selectedBuild, setSelectedBuild] = useState(null);
+                    const [agents, setAgents] = useState([]);
+                    const [selectedAgent, setSelectedAgent] = useState(null);
+
+                    const fetchData = useCallback(async () => {
+                        try {
+                            const [currentRes, buildsRes] = await Promise.all([
+                                fetch('/api/builds/current'),
+                                fetch('/api/builds')
+                            ]);
+                            const current = await currentRes.json();
+                            const all = await buildsRes.json();
+                            // If there's a running build, show it; otherwise show the most recent
+                            const activeBuild = current || (all && all[0]) || null;
+                            setCurrentBuild(activeBuild);
+                            // Show other builds in history (exclude the active one)
+                            const activeSessionID = activeBuild?.sessionID;
+                            setBuilds(all.filter(b => b.sessionID !== activeSessionID).slice(0, 10));
+                        } catch (e) {
+                            console.error('Failed to fetch:', e);
+                        }
+                    }, []);
+
+                    // Fetch agents once on mount
+                    useEffect(() => {
+                        fetch('/api/agents')
+                            .then(res => res.json())
+                            .then(data => {
+                                setAgents(data || []);
+                                // Auto-select first agent if available
+                                if (data && data.length > 0) {
+                                    setSelectedAgent(data[0].id);
+                                }
+                            })
+                            .catch(e => console.error('Failed to fetch agents:', e));
+                    }, []);
+
+                    useEffect(() => {
+                        fetchData();
+                        const interval = setInterval(fetchData, 1000);
+                        return () => clearInterval(interval);
+                    }, [fetchData]);
+
+                    const displayBuild = selectedBuild || currentBuild;
+
+                    return (
+                        <div className="min-h-screen">
+                            {/* Header */}
+                            <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                                <div className="container flex h-14 max-w-screen-xl items-center px-4 mx-auto">
+                                    <div className="flex items-center gap-2">
+                                        <Package className="h-5 w-5 text-primary" />
+                                        <span className="font-semibold">Swift Build Monitor</span>
+                                    </div>
+                                    <div className="flex-1" />
+                                    <div className="flex items-center gap-3">
+                                        {agents.length > 0 && (
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs text-muted-foreground">AI Assistant:</span>
+                                                <select
+                                                    value={selectedAgent || ''}
+                                                    onChange={(e) => setSelectedAgent(e.target.value)}
+                                                    className="h-8 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                                                >
+                                                    {agents.map(agent => (
+                                                        <option key={agent.id} value={agent.id}>
+                                                            {agent.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+                                        {currentBuild && <StatusBadge status={currentBuild.status} />}
+                                    </div>
+                                </div>
+                            </header>
+
+                            {/* Main */}
+                            <main className="container max-w-screen-xl mx-auto px-4 py-6">
+                                <BuildView build={displayBuild} />
+
+                                {/* Build History */}
+                                {builds.length > 0 && (
+                                    <Card className="mt-6">
+                                        <CardHeader>
+                                            <CardTitle className="text-base">Recent Builds</CardTitle>
+                                        </CardHeader>
+                                        <CardContent>
+                                            <div className="space-y-1">
+                                                {builds.map((build, i) => (
+                                                    <button
+                                                        key={build.sessionID || i}
+                                                        onClick={() => setSelectedBuild(build)}
+                                                        className="w-full flex items-center justify-between py-2 px-3 hover:bg-secondary/50 transition-colors rounded-md"
+                                                    >
+                                                        <div className="flex items-center gap-3">
+                                                            <StatusBadge status={build.status} size="sm" />
+                                                            <span className="font-medium text-sm">{build.configuration}</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                                                            <span className="tabular-nums">{build.completedTaskCount} tasks</span>
+                                                            <span className="tabular-nums">{formatDuration(build.durationSeconds)}</span>
+                                                            <span>{formatTimeShort(build.startTime)}</span>
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </CardContent>
+                                    </Card>
+                                )}
+
+                                {selectedBuild && (
+                                    <div className="mt-4 flex justify-center">
+                                        <button
+                                            onClick={() => setSelectedBuild(null)}
+                                            className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                                        >
+                                            Back to current build
+                                        </button>
+                                    </div>
+                                )}
+                            </main>
+                        </div>
+                    );
+                }
+
+                const root = ReactDOM.createRoot(document.getElementById('root'));
+                root.render(<App />);
+            </script>
+        </body>
+        </html>
+        """
+    }
+}
+
+// MARK: - HTTP Response
+
+struct HTTPResponse {
+    let status: Int
+    let contentType: String
+    var headers: [String: String] = [:]
+    let body: String
+
+    func toString() -> String {
+        let statusText: String
+        switch status {
+        case 200: statusText = "OK"
+        case 404: statusText = "Not Found"
+        case 405: statusText = "Method Not Allowed"
+        case 500: statusText = "Internal Server Error"
+        default: statusText = "Unknown"
+        }
+
+        var response = "HTTP/1.1 \(status) \(statusText)\r\n"
+        response += "Content-Type: \(contentType)\r\n"
+        response += "Content-Length: \(body.utf8.count)\r\n"
+        response += "Access-Control-Allow-Origin: *\r\n"
+
+        for (key, value) in headers {
+            response += "\(key): \(value)\r\n"
+        }
+
+        response += "\r\n"
+        response += body
+
+        return response
+    }
+}
+
+// MARK: - Errors
+
+enum HTTPError: Error {
+    case socketCreationFailed(errno: Int32)
+    case bindFailed(errno: Int32)
+    case listenFailed(errno: Int32)
+}

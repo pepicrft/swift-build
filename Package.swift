@@ -79,6 +79,7 @@ let package = Package(
     products: [
         .executable(name: "swbuild", targets: ["swbuild"]),
         .executable(name: "SWBBuildServiceBundle", targets: ["SWBBuildServiceBundle"]),
+        .executable(name: "swbuild-collector", targets: ["swbuild-collector"]),
         .library(name: "SwiftBuild", targets: ["SwiftBuild"]),
         .library(name: "SWBProtocol", targets: ["SWBProtocol"]),
         .library(name: "SWBUtil", targets: ["SWBUtil"]),
@@ -102,6 +103,12 @@ let package = Package(
             ],
             exclude: ["CMakeLists.txt"],
             swiftSettings: swiftSettings(languageMode: .v6)),
+        .executableTarget(
+            name: "swbuild-collector",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: swiftSettings(languageMode: .v6) + [.unsafeFlags(["-parse-as-library"])]),
 
         // Libraries
         .target(
