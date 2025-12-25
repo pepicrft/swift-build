@@ -938,6 +938,42 @@ final class HTTPServer: @unchecked Sendable {
                         rowLabels.push(row + 1);
                     }
 
+                    // Find first task index for each target (for legend click)
+                    var firstTaskByTarget = {};
+                    for (var fi = 0; fi < tasks.length; fi++) {
+                        var tgt = tasks[fi].targetName;
+                        if (firstTaskByTarget[tgt] === undefined) {
+                            firstTaskByTarget[tgt] = fi;
+                        }
+                    }
+
+                    // Scroll to target's first task
+                    var scrollToTarget = function(targetName) {
+                        var idx = firstTaskByTarget[targetName];
+                        if (idx !== undefined) {
+                            var el = document.getElementById('task-bar-' + idx);
+                            if (el) {
+                                el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+                                el.style.outline = '2px solid white';
+                                el.style.outlineOffset = '1px';
+                                el.style.zIndex = '10';
+                                setTimeout(function() {
+                                    el.style.outline = '';
+                                    el.style.outlineOffset = '';
+                                    el.style.zIndex = '';
+                                }, 2000);
+                            }
+                        }
+                    };
+
+                    // Format duration for bar label
+                    var formatDur = function(ms) {
+                        var s = ms / 1000;
+                        if (s < 1) return Math.round(ms) + 'ms';
+                        if (s < 60) return s.toFixed(1) + 's';
+                        return Math.floor(s / 60) + 'm' + Math.round(s % 60) + 's';
+                    };
+
                     return (
                         <Card className="mb-6">
                             <CardHeader className="pb-2">
@@ -945,21 +981,25 @@ final class HTTPServer: @unchecked Sendable {
                                 <CardDescription>Peak: {numRows} concurrent tasks</CardDescription>
                             </CardHeader>
                             <CardContent>
-                                {/* Legend - scrollable, full names */}
+                                {/* Legend - scrollable, clickable */}
                                 <div className="overflow-x-auto mb-3 pb-1">
                                     <div className="flex gap-3 text-xs">
                                         {colorKeys.map(function(name) {
                                             return (
-                                                <div key={name} className="flex items-center gap-1.5 shrink-0">
+                                                <button
+                                                    key={name}
+                                                    onClick={function() { scrollToTarget(name); }}
+                                                    className="flex items-center gap-1.5 shrink-0 hover:bg-secondary/50 px-1.5 py-0.5 rounded transition-colors"
+                                                >
                                                     <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: colors[name].bg }}></div>
                                                     <span className="text-muted-foreground whitespace-nowrap">{name}</span>
-                                                </div>
+                                                </button>
                                             );
                                         })}
                                     </div>
                                 </div>
                                 {/* Chart with horizontal scroll */}
-                                <div className="overflow-x-auto">
+                                <div className="overflow-x-auto" id="parallelism-chart">
                                     <div className="flex" style={{ minWidth: Math.max(600, tasks.length * 8) }}>
                                         {/* Y-axis */}
                                         <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground shrink-0" style={{ height: height - 20, paddingTop: 2 }}>
@@ -975,12 +1015,15 @@ final class HTTPServer: @unchecked Sendable {
                                             {labels.map(function(l, idx) {
                                                 return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
                                             })}
-                                            {tasks.map(function(t) {
+                                            {tasks.map(function(t, idx) {
+                                                var showLabel = t.width > 6;
+                                                var durMs = t.end - t.start;
                                                 return (
                                                     <div
                                                         key={t.id}
-                                                        className="absolute rounded-sm"
-                                                        title={t.name + ' (' + t.targetName + ')'}
+                                                        id={'task-bar-' + idx}
+                                                        className="absolute rounded-sm overflow-hidden cursor-default hover:brightness-110 transition-all"
+                                                        title={t.name + '\n' + t.targetName + '\n' + formatDur(durMs)}
                                                         style={{
                                                             left: t.left + '%',
                                                             width: t.width + '%',
@@ -989,7 +1032,13 @@ final class HTTPServer: @unchecked Sendable {
                                                             backgroundColor: t.color.bg,
                                                             minWidth: 2,
                                                         }}
-                                                    ></div>
+                                                    >
+                                                        {showLabel && (
+                                                            <span className="absolute inset-0 flex items-center px-1 text-[8px] font-medium text-white truncate" style={{ textShadow: '0 0 2px rgba(0,0,0,0.5)' }}>
+                                                                {t.name}
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                 );
                                             })}
                                             <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
