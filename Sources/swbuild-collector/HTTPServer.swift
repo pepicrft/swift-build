@@ -884,87 +884,112 @@ final class HTTPServer: @unchecked Sendable {
                         }
                     };
 
-                    // Process build data into timeline format - simple static computation
-                    if (!build || !build.targets || build.targets.length === 0) return null;
-
-                    var tasks = [];
-                    // Use colors passed from parent for consistency with target list
-                    var colors = targetColors;
-
-                    for (var ti = 0; ti < build.targets.length; ti++) {
-                        var target = build.targets[ti];
-                        var color = colors[target.name] || TARGET_COLORS[0];
-                        var targetTasks = target.tasks || [];
-                        for (var j = 0; j < targetTasks.length; j++) {
-                            var task = targetTasks[j];
-                            if (task.startTime) {
-                                tasks.push({
-                                    id: ti + '-' + j,
-                                    name: getReadableRuleName(task.ruleInfo, task.type),
-                                    targetName: target.name,
-                                    color: color,
-                                    status: task.status,
-                                    cached: task.status === 'cached',
-                                    start: new Date(task.startTime).getTime(),
-                                    end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
-                                });
+                    // Create a stable key for memoization based on task count and timing
+                    const buildKey = useMemo(function() {
+                        if (!build || !build.targets) return '';
+                        var taskCount = 0;
+                        var latestEnd = 0;
+                        for (var i = 0; i < build.targets.length; i++) {
+                            var tasks = build.targets[i].tasks || [];
+                            taskCount += tasks.length;
+                            for (var j = 0; j < tasks.length; j++) {
+                                if (tasks[j].endTime) {
+                                    var end = new Date(tasks[j].endTime).getTime();
+                                    if (end > latestEnd) latestEnd = end;
+                                }
                             }
                         }
-                    }
+                        return taskCount + ':' + latestEnd + ':' + build.targets.length;
+                    }, [build]);
 
-                    if (tasks.length === 0) return null;
+                    // Memoize heavy timeline computation
+                    const timelineData = useMemo(function() {
+                        if (!build || !build.targets || build.targets.length === 0) return null;
 
-                    var timestamps = tasks.map(function(t) { return t.start; }).concat(tasks.map(function(t) { return t.end; }));
-                    var minT = Math.min.apply(null, timestamps);
-                    var maxT = Math.max.apply(null, timestamps);
-                    var dur = maxT - minT;
-                    if (dur <= 0) return null;
+                        var tasks = [];
+                        var colors = targetColors;
 
-                    // Use pixel-based positioning (fixed scale) so bars don't shift when duration extends
-                    var durSec = dur / 1000;
-                    var pxPerSec = 20; // 20 pixels per second
-                    var chartWidth = Math.max(600, durSec * pxPerSec);
-
-                    // Sort by start time
-                    tasks.sort(function(a, b) { return a.start - b.start; });
-
-                    // Assign rows (greedy interval scheduling)
-                    var rowEnds = [];
-                    for (var i = 0; i < tasks.length; i++) {
-                        var t = tasks[i];
-                        var row = -1;
-                        for (var r = 0; r < rowEnds.length; r++) {
-                            if (t.start >= rowEnds[r]) {
-                                row = r;
-                                break;
+                        for (var ti = 0; ti < build.targets.length; ti++) {
+                            var target = build.targets[ti];
+                            var color = colors[target.name] || TARGET_COLORS[0];
+                            var targetTasks = target.tasks || [];
+                            for (var j = 0; j < targetTasks.length; j++) {
+                                var task = targetTasks[j];
+                                if (task.startTime) {
+                                    tasks.push({
+                                        id: ti + '-' + j,
+                                        name: getReadableRuleName(task.ruleInfo, task.type),
+                                        targetName: target.name,
+                                        color: color,
+                                        status: task.status,
+                                        cached: task.status === 'cached',
+                                        start: new Date(task.startTime).getTime(),
+                                        end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
+                                    });
+                                }
                             }
                         }
-                        if (row === -1) {
-                            row = rowEnds.length;
-                            rowEnds.push(0);
+
+                        if (tasks.length === 0) return null;
+
+                        var timestamps = tasks.map(function(t) { return t.start; }).concat(tasks.map(function(t) { return t.end; }));
+                        var minT = Math.min.apply(null, timestamps);
+                        var maxT = Math.max.apply(null, timestamps);
+                        var dur = maxT - minT;
+                        if (dur <= 0) return null;
+
+                        var durSec = dur / 1000;
+                        var pxPerSec = 20;
+                        var chartWidth = Math.max(600, durSec * pxPerSec);
+
+                        tasks.sort(function(a, b) { return a.start - b.start; });
+
+                        var rowEnds = [];
+                        for (var i = 0; i < tasks.length; i++) {
+                            var t = tasks[i];
+                            var row = -1;
+                            for (var r = 0; r < rowEnds.length; r++) {
+                                if (t.start >= rowEnds[r]) {
+                                    row = r;
+                                    break;
+                                }
+                            }
+                            if (row === -1) {
+                                row = rowEnds.length;
+                                rowEnds.push(0);
+                            }
+                            t.row = row;
+                            t.leftPx = ((t.start - minT) / 1000) * pxPerSec;
+                            t.widthPx = Math.max(3, ((t.end - t.start) / 1000) * pxPerSec);
+                            rowEnds[row] = t.end;
                         }
-                        t.row = row;
-                        // Pixel-based positioning
-                        t.leftPx = ((t.start - minT) / 1000) * pxPerSec;
-                        t.widthPx = Math.max(3, ((t.end - t.start) / 1000) * pxPerSec);
-                        rowEnds[row] = t.end;
-                    }
 
-                    var numRows = rowEnds.length;
-                    var rh = 18;
-                    var maxRows = 15; // Cap at 15 rows to prevent layout shifts
-                    var height = Math.max(50, Math.min(numRows, maxRows) * rh + 32);
+                        var numRows = rowEnds.length;
+                        var rh = 18;
+                        var maxRows = 15;
+                        var height = Math.max(50, Math.min(numRows, maxRows) * rh + 32);
 
-                    // Time labels (pixel-based)
-                    var interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
-                    var labels = [];
-                    for (var s = 0; s <= durSec; s += interval) {
-                        labels.push({
-                            leftPx: s * pxPerSec,
-                            txt: s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60 > 0 ? s%60 + 's' : ''),
-                        });
-                    }
+                        var interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
+                        var labels = [];
+                        for (var s = 0; s <= durSec; s += interval) {
+                            labels.push({
+                                leftPx: s * pxPerSec,
+                                txt: s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60 > 0 ? s%60 + 's' : ''),
+                            });
+                        }
 
+                        return { tasks: tasks, chartWidth: chartWidth, numRows: numRows, height: height, labels: labels, rh: rh, colors: colors };
+                    }, [buildKey, targetColors]);
+
+                    if (!timelineData) return null;
+
+                    var tasks = timelineData.tasks;
+                    var chartWidth = timelineData.chartWidth;
+                    var numRows = timelineData.numRows;
+                    var height = timelineData.height;
+                    var labels = timelineData.labels;
+                    var rh = timelineData.rh;
+                    var colors = timelineData.colors;
                     var colorKeys = Object.keys(colors);
 
                     // Create Y-axis row labels (show every row or every other for many rows)
@@ -1545,6 +1570,12 @@ final class HTTPServer: @unchecked Sendable {
                         : 0;
 
                     // Compute consistent colors for targets (shared between timeline and target list)
+                    // Use target names as dependency key to avoid recomputing on every poll
+                    const targetNames = useMemo(() => {
+                        if (!build.targets) return '';
+                        return build.targets.map(t => t.name).sort().join(',');
+                    }, [build.targets]);
+
                     const targetColors = useMemo(() => {
                         var colors = {};
                         var ci = 0;
@@ -1558,9 +1589,15 @@ final class HTTPServer: @unchecked Sendable {
                             }
                         }
                         return colors;
-                    }, [build.targets]);
+                    }, [targetNames]);
 
                     // Sort targets: running first, then by start time
+                    // Compute a stable key to avoid re-sorting on every poll
+                    const targetsKey = useMemo(() => {
+                        if (!build.targets) return '';
+                        return build.targets.map(t => t.name + ':' + t.status + ':' + (t.startTime || '')).join('|');
+                    }, [build.targets]);
+
                     const sortedTargets = useMemo(() => {
                         if (!build.targets) return [];
                         return [...build.targets].sort((a, b) => {
@@ -1572,7 +1609,7 @@ final class HTTPServer: @unchecked Sendable {
                             if (!b.startTime) return -1;
                             return new Date(a.startTime) - new Date(b.startTime);
                         });
-                    }, [build.targets]);
+                    }, [targetsKey]);
 
                     return (
                         <div className="space-y-4">
