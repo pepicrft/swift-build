@@ -971,12 +971,20 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Timeline Target Item
-                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast, selectedAgent, hasAgent }) => {
+                const TimelineTarget = ({ target, buildStatus, buildStartTime, buildDuration, isFirst, isLast, selectedAgent, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
                     const [showAllTasks, setShowAllTasks] = useState(false);
                     const [explanation, setExplanation] = useState(null);
                     const [isLoadingExplanation, setIsLoadingExplanation] = useState(false);
                     const [requestId, setRequestId] = useState(null);
+
+                    // Derive effective status: if build is complete but target shows running, use build status
+                    const effectiveStatus = useMemo(() => {
+                        if (target.status === 'running' && (buildStatus === 'succeeded' || buildStatus === 'failed')) {
+                            return buildStatus;
+                        }
+                        return target.status;
+                    }, [target.status, buildStatus]);
 
                     // Cancel request when component unmounts
                     useEffect(() => {
@@ -1049,13 +1057,13 @@ final class HTTPServer: @unchecked Sendable {
                                 {/* Timeline dot */}
                                 <div className="relative flex flex-col items-center">
                                     <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                                        target.status === 'succeeded' ? 'border-emerald-500 bg-emerald-100' :
-                                        target.status === 'failed' ? 'border-red-500 bg-red-100' :
-                                        target.status === 'running' ? 'border-blue-500 bg-blue-100' : 'border-border bg-secondary'
+                                        effectiveStatus === 'succeeded' ? 'border-emerald-500 bg-emerald-100' :
+                                        effectiveStatus === 'failed' ? 'border-red-500 bg-red-100' :
+                                        effectiveStatus === 'running' ? 'border-blue-500 bg-blue-100' : 'border-border bg-secondary'
                                     }`}>
-                                        {target.status === 'succeeded' && <CheckCircle className="h-3 w-3 text-emerald-600" />}
-                                        {target.status === 'failed' && <XCircle className="h-3 w-3 text-red-600" />}
-                                        {target.status === 'running' && <Loader className="h-3 w-3 text-blue-600" />}
+                                        {effectiveStatus === 'succeeded' && <CheckCircle className="h-3 w-3 text-emerald-600" />}
+                                        {effectiveStatus === 'failed' && <XCircle className="h-3 w-3 text-red-600" />}
+                                        {effectiveStatus === 'running' && <Loader className="h-3 w-3 text-blue-600" />}
                                     </div>
                                     {!isLast && (
                                         <div className="w-0.5 flex-1 bg-border mt-1" />
@@ -1077,7 +1085,7 @@ final class HTTPServer: @unchecked Sendable {
                                                         <CardTitle className="text-sm truncate">{target.name}</CardTitle>
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0">
-                                                        <StatusBadge status={target.status} size="sm" />
+                                                        <StatusBadge status={effectiveStatus} size="sm" />
                                                         <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${expanded ? 'rotate-180' : ''}`} />
                                                     </div>
                                                 </div>
@@ -1106,11 +1114,11 @@ final class HTTPServer: @unchecked Sendable {
                                                 <div className="mt-2 h-1.5 bg-secondary rounded-full overflow-hidden">
                                                     <div
                                                         className={`h-full rounded-full transition-all duration-300 ${
-                                                            target.status === 'succeeded' ? 'bg-emerald-500' :
-                                                            target.status === 'failed' ? 'bg-red-500' :
-                                                            target.status === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground'
+                                                            effectiveStatus === 'succeeded' ? 'bg-emerald-500' :
+                                                            effectiveStatus === 'failed' ? 'bg-red-500' :
+                                                            effectiveStatus === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground'
                                                         }`}
-                                                        style={{ width: target.status === 'running' ? '100%' : (target.status === 'succeeded' || target.status === 'failed') ? '100%' : '0%' }}
+                                                        style={{ width: effectiveStatus === 'running' ? '100%' : (effectiveStatus === 'succeeded' || effectiveStatus === 'failed') ? '100%' : '0%' }}
                                                     />
                                                 </div>
                                             </CardHeader>
@@ -1279,6 +1287,7 @@ final class HTTPServer: @unchecked Sendable {
                                                 <TimelineTarget
                                                     key={target.id || target.name}
                                                     target={target}
+                                                    buildStatus={build.status}
                                                     buildStartTime={build.startTime}
                                                     buildDuration={build.durationSeconds}
                                                     isFirst={i === 0}
