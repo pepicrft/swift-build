@@ -38,12 +38,14 @@ if [ ! -f "$BUILD_SERVICE_PATH" ]; then
     exit 1
 fi
 
-# Start the collector if not already running
-if ! lsof -i ":$PORT" >/dev/null 2>&1; then
-    echo "Starting telemetry collector..."
-    "$COLLECTOR_PATH" --socket "$SOCKET_PATH" --port "$PORT" &
-    sleep 0.5  # Give it time to start
-fi
+# Kill any existing collector to ensure we use the latest build
+pkill -f swbuild-collector 2>/dev/null || true
+sleep 0.2
+
+# Start the collector
+echo "Starting telemetry collector on port $PORT..."
+"$COLLECTOR_PATH" --socket "$SOCKET_PATH" --port "$PORT" &
+sleep 0.5  # Give it time to start
 
 # Open the web UI in the browser
 open "http://localhost:$PORT"
