@@ -173,6 +173,33 @@ actor BuildStore {
     nonisolated(unsafe) var onBuildCompleted: ((Build) -> Void)?
 
     func handleBuildStarted(sessionID: String, configuration: String, action: String) {
+        // Finalize any existing running builds (mark as cancelled and move to history)
+        for (existingID, existingBuild) in builds {
+            if existingBuild.status == "running" && existingID != sessionID {
+                existingBuild.status = "cancelled"
+                existingBuild.endTime = Date()
+                // Finalize running targets/tasks
+                for target in existingBuild.targets.values {
+                    if target.status == "running" {
+                        target.status = "cancelled"
+                        target.endTime = Date()
+                    }
+                }
+                for task in existingBuild.tasksBySignature.values {
+                    if task.status == "running" {
+                        task.status = "cancelled"
+                        task.endTime = Date()
+                    }
+                }
+                // Move to history
+                buildHistory.insert(existingBuild, at: 0)
+                if buildHistory.count > maxHistory {
+                    buildHistory.removeLast()
+                }
+                builds.removeValue(forKey: existingID)
+            }
+        }
+
         let build = Build(sessionID: sessionID, configuration: configuration, action: action)
         builds[sessionID] = build
 
