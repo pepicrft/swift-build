@@ -849,6 +849,37 @@ final class HTTPServer: @unchecked Sendable {
                 // Parallelism Timeline Component (like Xcode Build Timeline)
                 const ParallelismTimeline = function(props) {
                     const build = props.build;
+                    const scrollRef = useRef(null);
+                    const wasAtEndRef = useRef(true);
+
+                    // Check if scrolled to end before render
+                    useEffect(function() {
+                        var el = scrollRef.current;
+                        if (el) {
+                            var atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 50;
+                            if (wasAtEndRef.current && atEnd === false) {
+                                // User scrolled away from end, don't auto-scroll
+                            } else if (atEnd) {
+                                wasAtEndRef.current = true;
+                            }
+                        }
+                    });
+
+                    // Auto-scroll to end only if was at end
+                    useEffect(function() {
+                        var el = scrollRef.current;
+                        if (el && wasAtEndRef.current) {
+                            el.scrollLeft = el.scrollWidth;
+                        }
+                    }, [build]);
+
+                    // Track when user scrolls
+                    var handleScroll = function() {
+                        var el = scrollRef.current;
+                        if (el) {
+                            wasAtEndRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 50;
+                        }
+                    };
 
                     // Process build data into timeline format - simple static computation
                     if (!build || !build.targets || build.targets.length === 0) return null;
@@ -1010,7 +1041,7 @@ final class HTTPServer: @unchecked Sendable {
                                     </div>
                                 </div>
                                 {/* Chart with horizontal scroll */}
-                                <div className="overflow-x-auto" id="parallelism-chart">
+                                <div className="overflow-x-auto" ref={scrollRef} onScroll={handleScroll}>
                                     <div className="flex" style={{ minWidth: Math.max(600, tasks.length * 8) }}>
                                         {/* Y-axis */}
                                         <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground shrink-0" style={{ height: height - 20, paddingTop: 2 }}>
