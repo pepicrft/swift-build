@@ -531,7 +531,7 @@ final class HTTPServer: @unchecked Sendable {
         <body class="bg-background text-foreground min-h-screen antialiased">
             <div id="root"></div>
             <script type="text/babel">
-                const { useState, useEffect, useCallback, useMemo } = React;
+                const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
                 // Utilities
                 const formatDuration = (seconds) => {
