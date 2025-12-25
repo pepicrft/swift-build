@@ -828,6 +828,236 @@ final class HTTPServer: @unchecked Sendable {
                     <div className={`p-4 pt-0 ${className}`}>{children}</div>
                 );
 
+                // Color palette for targets (distinct, accessible colors)
+                const TARGET_COLORS = [
+                    { bg: 'rgb(59, 130, 246)', light: 'rgba(59, 130, 246, 0.2)', name: 'blue' },
+                    { bg: 'rgb(16, 185, 129)', light: 'rgba(16, 185, 129, 0.2)', name: 'emerald' },
+                    { bg: 'rgb(249, 115, 22)', light: 'rgba(249, 115, 22, 0.2)', name: 'orange' },
+                    { bg: 'rgb(139, 92, 246)', light: 'rgba(139, 92, 246, 0.2)', name: 'violet' },
+                    { bg: 'rgb(236, 72, 153)', light: 'rgba(236, 72, 153, 0.2)', name: 'pink' },
+                    { bg: 'rgb(20, 184, 166)', light: 'rgba(20, 184, 166, 0.2)', name: 'teal' },
+                    { bg: 'rgb(245, 158, 11)', light: 'rgba(245, 158, 11, 0.2)', name: 'amber' },
+                    { bg: 'rgb(99, 102, 241)', light: 'rgba(99, 102, 241, 0.2)', name: 'indigo' },
+                    { bg: 'rgb(244, 63, 94)', light: 'rgba(244, 63, 94, 0.2)', name: 'rose' },
+                    { bg: 'rgb(34, 197, 94)', light: 'rgba(34, 197, 94, 0.2)', name: 'green' },
+                    { bg: 'rgb(168, 85, 247)', light: 'rgba(168, 85, 247, 0.2)', name: 'purple' },
+                    { bg: 'rgb(6, 182, 212)', light: 'rgba(6, 182, 212, 0.2)', name: 'cyan' },
+                ];
+
+                // Parallelism Timeline Component (like Xcode Build Timeline)
+                const ParallelismTimeline = ({ build }) => {
+                    const [hoveredTask, setHoveredTask] = useState(null);
+                    const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+                    const timelineData = useMemo(() => {
+                        if (!build || !build.targets) return null;
+
+                        // Collect all tasks with their target info
+                        const allTasks = [];
+                        const targetColorMap = {};
+                        let colorIndex = 0;
+
+                        build.targets.forEach(target => {
+                            if (!targetColorMap[target.name]) {
+                                targetColorMap[target.name] = TARGET_COLORS[colorIndex % TARGET_COLORS.length];
+                                colorIndex++;
+                            }
+                            const color = targetColorMap[target.name];
+
+                            (target.tasks || []).forEach(task => {
+                                if (task.startTime) {
+                                    allTasks.push({
+                                        ...task,
+                                        targetName: target.name,
+                                        color: color,
+                                        startMs: new Date(task.startTime).getTime(),
+                                        endMs: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
+                                    });
+                                }
+                            });
+                        });
+
+                        if (allTasks.length === 0) return null;
+
+                        // Calculate time bounds
+                        const minTime = Math.min(...allTasks.map(t => t.startMs));
+                        const maxTime = Math.max(...allTasks.map(t => t.endMs));
+                        const duration = maxTime - minTime;
+
+                        if (duration <= 0) return null;
+
+                        // Sort tasks by start time
+                        allTasks.sort((a, b) => a.startMs - b.startMs);
+
+                        // Assign rows using a greedy algorithm (like interval scheduling)
+                        const rows = [];
+                        allTasks.forEach(task => {
+                            // Find the first row where this task fits (doesn't overlap)
+                            let assignedRow = -1;
+                            for (let i = 0; i < rows.length; i++) {
+                                const lastTaskInRow = rows[i][rows[i].length - 1];
+                                if (task.startMs >= lastTaskInRow.endMs) {
+                                    assignedRow = i;
+                                    break;
+                                }
+                            }
+                            if (assignedRow === -1) {
+                                // Need a new row
+                                assignedRow = rows.length;
+                                rows.push([]);
+                            }
+                            task.row = assignedRow;
+                            rows[assignedRow].push(task);
+                        });
+
+                        return {
+                            tasks: allTasks,
+                            targetColorMap,
+                            minTime,
+                            maxTime,
+                            duration,
+                            rowCount: rows.length,
+                            maxParallelism: rows.length,
+                        };
+                    }, [build]);
+
+                    if (!timelineData) return null;
+
+                    const { tasks, targetColorMap, minTime, duration, rowCount } = timelineData;
+                    const rowHeight = 20;
+                    const timelineHeight = rowCount * rowHeight + 40; // Extra space for time axis
+
+                    const handleMouseMove = (e, task) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                        setHoveredTask(task);
+                    };
+
+                    // Generate time axis labels
+                    const timeLabels = useMemo(() => {
+                        const labels = [];
+                        const durationSec = duration / 1000;
+                        let interval;
+                        if (durationSec < 10) interval = 1;
+                        else if (durationSec < 60) interval = 5;
+                        else if (durationSec < 300) interval = 30;
+                        else interval = 60;
+
+                        for (let t = 0; t <= durationSec; t += interval) {
+                            labels.push({
+                                time: t,
+                                percent: (t / durationSec) * 100,
+                                label: t < 60 ? `${t}s` : `${Math.floor(t/60)}m${t%60 > 0 ? (t%60)+'s' : ''}`,
+                            });
+                        }
+                        return labels;
+                    }, [duration]);
+
+                    return (
+                        <Card className="mb-6">
+                            <CardHeader className="pb-2">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <CardTitle className="text-base">Build Parallelism</CardTitle>
+                                        <CardDescription>
+                                            Peak parallelism: {timelineData.maxParallelism} concurrent tasks
+                                        </CardDescription>
+                                    </div>
+                                </div>
+                            </CardHeader>
+                            <CardContent>
+                                {/* Legend */}
+                                <div className="flex flex-wrap gap-2 mb-3 text-xs">
+                                    {Object.entries(targetColorMap).slice(0, 8).map(([name, color]) => (
+                                        <div key={name} className="flex items-center gap-1">
+                                            <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: color.bg }} />
+                                            <span className="text-muted-foreground truncate max-w-[120px]">{name}</span>
+                                        </div>
+                                    ))}
+                                    {Object.keys(targetColorMap).length > 8 && (
+                                        <span className="text-muted-foreground">+{Object.keys(targetColorMap).length - 8} more</span>
+                                    )}
+                                </div>
+
+                                {/* Timeline */}
+                                <div
+                                    className="relative bg-secondary/30 rounded-lg overflow-hidden"
+                                    style={{ height: timelineHeight }}
+                                    onMouseLeave={() => setHoveredTask(null)}
+                                >
+                                    {/* Time axis grid lines */}
+                                    {timeLabels.map(({ percent }, i) => (
+                                        <div
+                                            key={i}
+                                            className="absolute top-0 bottom-6 w-px bg-border/50"
+                                            style={{ left: `${percent}%` }}
+                                        />
+                                    ))}
+
+                                    {/* Task bars */}
+                                    {tasks.map((task, i) => {
+                                        const left = ((task.startMs - minTime) / duration) * 100;
+                                        const width = Math.max(0.5, ((task.endMs - task.startMs) / duration) * 100);
+                                        const top = task.row * rowHeight + 4;
+
+                                        return (
+                                            <div
+                                                key={task.signature || i}
+                                                className="absolute rounded-sm cursor-pointer transition-opacity hover:opacity-80"
+                                                style={{
+                                                    left: `${left}%`,
+                                                    width: `${width}%`,
+                                                    top: top,
+                                                    height: rowHeight - 4,
+                                                    backgroundColor: task.color.bg,
+                                                    minWidth: 2,
+                                                }}
+                                                onMouseMove={(e) => handleMouseMove(e, task)}
+                                                onMouseLeave={() => setHoveredTask(null)}
+                                            />
+                                        );
+                                    })}
+
+                                    {/* Time axis labels */}
+                                    <div className="absolute bottom-0 left-0 right-0 h-6 flex items-center border-t border-border/50">
+                                        {timeLabels.map(({ percent, label }, i) => (
+                                            <span
+                                                key={i}
+                                                className="absolute text-[10px] text-muted-foreground transform -translate-x-1/2"
+                                                style={{ left: `${percent}%` }}
+                                            >
+                                                {label}
+                                            </span>
+                                        ))}
+                                    </div>
+
+                                    {/* Tooltip */}
+                                    {hoveredTask && (
+                                        <div
+                                            className="absolute z-10 bg-popover border border-border rounded-md shadow-lg p-2 text-xs pointer-events-none max-w-xs"
+                                            style={{
+                                                left: Math.min(tooltipPos.x + 10, 300),
+                                                top: Math.max(0, tooltipPos.y - 60),
+                                            }}
+                                        >
+                                            <div className="font-medium text-foreground truncate">
+                                                {getReadableRuleName(hoveredTask.ruleInfo, hoveredTask.type)}
+                                            </div>
+                                            <div className="text-muted-foreground mt-1">
+                                                <span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ backgroundColor: hoveredTask.color.bg }} />
+                                                {hoveredTask.targetName}
+                                            </div>
+                                            <div className="text-muted-foreground">
+                                                Duration: {formatDuration((hoveredTask.endMs - hoveredTask.startMs) / 1000)}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </CardContent>
+                        </Card>
+                    );
+                };
+
                 // Simple markdown to HTML converter
                 const renderMarkdown = (text) => {
                     if (!text) return '';
@@ -1331,11 +1561,14 @@ final class HTTPServer: @unchecked Sendable {
                                 </CardContent>
                             </Card>
 
-                            {/* Timeline */}
+                            {/* Parallelism Timeline */}
+                            <ParallelismTimeline build={build} />
+
+                            {/* Target List */}
                             {sortedTargets.length > 0 && (
                                 <Card>
                                     <CardHeader>
-                                        <CardTitle className="text-base">Build Timeline</CardTitle>
+                                        <CardTitle className="text-base">Build Targets</CardTitle>
                                         <CardDescription>
                                             {sortedTargets.length} targets in dependency order
                                         </CardDescription>
