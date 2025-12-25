@@ -513,6 +513,17 @@ final class HTTPServer: @unchecked Sendable {
                     return new Date(isoString).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 };
 
+                // Helper to remove trailing backslashes (from escaped spaces in paths)
+                // Uses String.fromCharCode to avoid escaping complexity in nested Swift/JS strings
+                const BS = String.fromCharCode(92); // backslash character
+                const removeTrailingBS = (s) => {
+                    if (!s) return '';
+                    while (s.endsWith(BS)) {
+                        s = s.slice(0, -1);
+                    }
+                    return s;
+                };
+
                 const formatTimeShort = (isoString) => {
                     if (!isoString) return '-';
                     return new Date(isoString).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -617,22 +628,45 @@ final class HTTPServer: @unchecked Sendable {
                         if (ruleName === 'SwiftDriver') {
                             // Format: SwiftDriver ModuleName normal arm64 ...
                             if (parts[1] && !parts[1].includes('/')) {
-                                const moduleName = parts[1].replace(/[\\\\]+$/, '');
+                                const moduleName = removeTrailingBS(parts[1]);
                                 return `${readableName}: ${moduleName}`;
                             }
                         }
-                        // Special handling for SwiftEmitModule
+                        // Special handling for SwiftEmitModule - extract module name
                         if (ruleName === 'SwiftEmitModule') {
-                            const match = ruleInfo.match(/module\\s+for[\\\\]?\\s+(\\w+)/i);
+                            // Format: SwiftEmitModule normal arm64 Emitting module for ModuleName
+                            // Or: SwiftEmitModule ModuleName normal arm64
+                            const match = ruleInfo.match(/Emitting\\s+module\\s+for\\s*(\\w+)/i);
                             if (match) {
                                 return `${readableName}: ${match[1]}`;
+                            }
+                            // Fallback: check if second part is the module name
+                            if (parts[1] && !parts[1].includes('/') && !['normal', 'debug', 'release'].includes(parts[1].toLowerCase())) {
+                                const moduleName = removeTrailingBS(parts[1]);
+                                return `${readableName}: ${moduleName}`;
+                            }
+                        }
+                        // Special handling for LinkStoryboards - extract storyboard name
+                        if (ruleName === 'LinkStoryboards') {
+                            // Format: LinkStoryboards /path/to/Something.storyboardc
+                            const storyboardPath = parts.find(p => p.includes('.storyboard'));
+                            if (storyboardPath) {
+                                let fileName = storyboardPath.split('/').pop() || '';
+                                fileName = removeTrailingBS(fileName);
+                                // Remove trailing 'c' from .storyboardc
+                                if (fileName.endsWith('.storyboardc')) {
+                                    fileName = fileName.slice(0, -1);
+                                }
+                                if (fileName) {
+                                    return `${readableName}: ${fileName}`;
+                                }
                             }
                         }
                         // Find the first path in ruleInfo (handle escaped spaces)
                         const pathPart = parts.slice(1).find(p => p.includes('/'));
                         if (pathPart) {
                             // Remove trailing backslash from escaped spaces and get filename
-                            const fileName = pathPart.split('/').pop()?.replace(/[\\\\]+$/, '');
+                            const fileName = removeTrailingBS(pathPart.split('/').pop() || '');
                             if (fileName) {
                                 return `${readableName}: ${fileName}`;
                             }
@@ -780,7 +814,7 @@ final class HTTPServer: @unchecked Sendable {
                     const ruleInfo = task.ruleInfo || '';
                     const rawFilePath = ruleInfo.includes('/') ? ruleInfo.split(' ').find(s => s.includes('/')) : null;
                     // Clean up file path - remove trailing backslashes from escaped spaces
-                    const filePath = rawFilePath ? rawFilePath.replace(/[\\\\]+$/, '') : null;
+                    const filePath = rawFilePath ? removeTrailingBS(rawFilePath) : null;
 
                     return (
                         <div className="mt-2 p-3 rounded-md bg-secondary text-xs space-y-2 font-mono overflow-hidden">
@@ -793,13 +827,13 @@ final class HTTPServer: @unchecked Sendable {
                             {ruleInfo && (
                                 <div className="flex gap-2">
                                     <span className="text-muted-foreground shrink-0">Rule:</span>
-                                    <span className="text-foreground break-all">{ruleInfo.split(' ')[0].replace(/[\\\\]+$/, '')}</span>
+                                    <span className="text-foreground break-all">{removeTrailingBS(ruleInfo.split(' ')[0])}</span>
                                 </div>
                             )}
                             {filePath && (
                                 <div className="flex gap-2">
                                     <span className="text-muted-foreground shrink-0">File:</span>
-                                    <span className="text-blue-600 break-all">{filePath.split('/').slice(-2).join('/').replace(/[\\\\]+$/, '')}</span>
+                                    <span className="text-blue-600 break-all">{removeTrailingBS(filePath.split('/').slice(-2).join('/'))}</span>
                                 </div>
                             )}
                             {task.startTime && (
