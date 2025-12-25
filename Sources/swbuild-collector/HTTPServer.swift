@@ -697,38 +697,6 @@ final class HTTPServer: @unchecked Sendable {
                     </svg>
                 );
 
-                const XMark = ({ className }) => (
-                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                );
-
-                // Modal Component
-                const Modal = ({ isOpen, onClose, title, children, isLoading }) => {
-                    if (!isOpen) return null;
-                    return (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center">
-                            <div className="fixed inset-0 bg-black/50" onClick={onClose} />
-                            <div className="relative bg-background rounded-lg shadow-lg border border-border max-w-md w-full mx-4 p-4">
-                                <div className="flex items-center justify-between mb-3">
-                                    <h3 className="font-semibold text-sm">{title}</h3>
-                                    <button onClick={onClose} className="p-1 hover:bg-secondary rounded">
-                                        <XMark className="h-4 w-4" />
-                                    </button>
-                                </div>
-                                <div className="text-sm text-muted-foreground">
-                                    {isLoading ? (
-                                        <div className="flex items-center gap-2">
-                                            <Loader className="h-4 w-4" />
-                                            <span>Asking AI assistant...</span>
-                                        </div>
-                                    ) : children}
-                                </div>
-                            </div>
-                        </div>
-                    );
-                };
-
                 // Badge Component
                 const Badge = ({ children, variant = 'default', className = '' }) => {
                     const variants = {
@@ -790,7 +758,7 @@ final class HTTPServer: @unchecked Sendable {
                 );
 
                 // Collapsible Task Detail
-                const TaskDetail = ({ task, isExpanded }) => {
+                const TaskDetail = ({ task, isExpanded, explanation, isLoadingExplanation, onRequestExplain, hasAgent }) => {
                     if (!isExpanded) return null;
                     const ruleInfo = task.ruleInfo || '';
                     const filePath = ruleInfo.includes('/') ? ruleInfo.split(' ').find(s => s.includes('/')) : null;
@@ -839,24 +807,85 @@ final class HTTPServer: @unchecked Sendable {
                                     <span className="text-muted-foreground truncate">{task.signature.substring(0, 50)}...</span>
                                 </div>
                             )}
+                            {/* AI Explanation section */}
+                            {hasAgent && (
+                                <div className="pt-2 mt-2 border-t border-border/50">
+                                    {explanation ? (
+                                        <div className="flex gap-2">
+                                            <span className="text-primary shrink-0">AI:</span>
+                                            <span className="text-foreground font-sans whitespace-pre-wrap">{explanation}</span>
+                                        </div>
+                                    ) : isLoadingExplanation ? (
+                                        <div className="flex items-center gap-2 text-muted-foreground">
+                                            <Loader className="h-3 w-3" />
+                                            <span className="font-sans">Asking AI...</span>
+                                        </div>
+                                    ) : (
+                                        <button
+                                            onClick={onRequestExplain}
+                                            className="flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors font-sans"
+                                        >
+                                            <QuestionMark className="h-3 w-3" />
+                                            <span>Explain this task</span>
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     );
                 };
 
                 // Task Item in Timeline
-                const TaskItem = ({ task, showDetail = false, onExplain, hasAgent }) => {
+                const TaskItem = ({ task, showDetail = false, selectedAgent, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
+                    const [explanation, setExplanation] = useState(null);
+                    const [isLoadingExplanation, setIsLoadingExplanation] = useState(false);
+                    const [requestId, setRequestId] = useState(null);
                     const readableName = getReadableRuleName(task.ruleInfo, task.type);
 
-                    const handleExplain = (e) => {
-                        e.stopPropagation();
-                        if (onExplain) {
-                            onExplain({
-                                type: 'task',
-                                name: readableName,
-                                ruleInfo: task.ruleInfo || '',
-                                taskType: task.type || ''
+                    // Cancel request when component unmounts or collapses
+                    useEffect(() => {
+                        return () => {
+                            if (requestId && isLoadingExplanation) {
+                                fetch('/api/explain/cancel', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ requestId })
+                                }).catch(() => {});
+                            }
+                        };
+                    }, [requestId, isLoadingExplanation]);
+
+                    const handleRequestExplain = async () => {
+                        if (!selectedAgent || isLoadingExplanation) return;
+
+                        const newRequestId = Math.random().toString(36).substring(2, 15);
+                        setRequestId(newRequestId);
+                        setIsLoadingExplanation(true);
+
+                        try {
+                            const response = await fetch('/api/explain', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    agentId: selectedAgent,
+                                    type: 'task',
+                                    name: readableName,
+                                    ruleInfo: task.ruleInfo || '',
+                                    taskType: task.type || '',
+                                    requestId: newRequestId
+                                })
                             });
+                            const data = await response.json();
+                            if (data.requestId === newRequestId) {
+                                setExplanation(data.explanation || 'No explanation available.');
+                            }
+                        } catch (e) {
+                            if (e.name !== 'AbortError') {
+                                setExplanation('Failed to get explanation.');
+                            }
+                        } finally {
+                            setIsLoadingExplanation(false);
                         }
                     };
 
@@ -875,34 +904,69 @@ final class HTTPServer: @unchecked Sendable {
                                 {task.durationSeconds != null && (
                                     <span className="text-[10px] text-muted-foreground tabular-nums">{formatDuration(task.durationSeconds)}</span>
                                 )}
-                                {hasAgent && (
-                                    <span
-                                        onClick={handleExplain}
-                                        className="p-0.5 rounded hover:bg-primary/10 opacity-0 group-hover:opacity-100 transition-opacity"
-                                        title="Explain this task"
-                                    >
-                                        <QuestionMark className="h-3 w-3 text-muted-foreground hover:text-primary" />
-                                    </span>
-                                )}
                                 <ChevronRight className={`h-3 w-3 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
                             </button>
-                            <TaskDetail task={task} isExpanded={expanded} />
+                            <TaskDetail
+                                task={task}
+                                isExpanded={expanded}
+                                explanation={explanation}
+                                isLoadingExplanation={isLoadingExplanation}
+                                onRequestExplain={handleRequestExplain}
+                                hasAgent={hasAgent}
+                            />
                         </div>
                     );
                 };
 
                 // Timeline Target Item
-                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast, onExplain, hasAgent }) => {
+                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast, selectedAgent, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
                     const [showAllTasks, setShowAllTasks] = useState(false);
+                    const [explanation, setExplanation] = useState(null);
+                    const [isLoadingExplanation, setIsLoadingExplanation] = useState(false);
+                    const [requestId, setRequestId] = useState(null);
 
-                    const handleExplainTarget = (e) => {
-                        e.stopPropagation();
-                        if (onExplain) {
-                            onExplain({
-                                type: 'target',
-                                name: target.name
+                    // Cancel request when component unmounts
+                    useEffect(() => {
+                        return () => {
+                            if (requestId && isLoadingExplanation) {
+                                fetch('/api/explain/cancel', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ requestId })
+                                }).catch(() => {});
+                            }
+                        };
+                    }, [requestId, isLoadingExplanation]);
+
+                    const handleRequestExplain = async () => {
+                        if (!selectedAgent || isLoadingExplanation) return;
+
+                        const newRequestId = Math.random().toString(36).substring(2, 15);
+                        setRequestId(newRequestId);
+                        setIsLoadingExplanation(true);
+
+                        try {
+                            const response = await fetch('/api/explain', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    agentId: selectedAgent,
+                                    type: 'target',
+                                    name: target.name,
+                                    requestId: newRequestId
+                                })
                             });
+                            const data = await response.json();
+                            if (data.requestId === newRequestId) {
+                                setExplanation(data.explanation || 'No explanation available.');
+                            }
+                        } catch (e) {
+                            if (e.name !== 'AbortError') {
+                                setExplanation('Failed to get explanation.');
+                            }
+                        } finally {
+                            setIsLoadingExplanation(false);
                         }
                     };
 
@@ -959,15 +1023,6 @@ final class HTTPServer: @unchecked Sendable {
                                                     <div className="flex items-center gap-2 min-w-0">
                                                         <Package className="h-4 w-4 text-muted-foreground shrink-0" />
                                                         <CardTitle className="text-sm truncate">{target.name}</CardTitle>
-                                                        {hasAgent && (
-                                                            <span
-                                                                onClick={handleExplainTarget}
-                                                                className="p-0.5 rounded hover:bg-primary/10 transition-opacity"
-                                                                title="Explain this target"
-                                                            >
-                                                                <QuestionMark className="h-3.5 w-3.5 text-muted-foreground hover:text-primary" />
-                                                            </span>
-                                                        )}
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <StatusBadge status={target.status} size="sm" />
@@ -1010,28 +1065,56 @@ final class HTTPServer: @unchecked Sendable {
                                         </button>
 
                                         {/* Expanded content */}
-                                        {expanded && target.tasks && target.tasks.length > 0 && (
+                                        {expanded && (
                                             <CardContent className="border-t border-border pt-3">
-                                                <div className="space-y-1 max-h-80 overflow-y-auto scrollbar-thin">
-                                                    {visibleTasks?.map((task, i) => (
-                                                        <TaskItem key={task.signature || i} task={task} onExplain={onExplain} hasAgent={hasAgent} />
-                                                    ))}
-                                                </div>
-                                                {!showAllTasks && hiddenCount > 0 && (
-                                                    <button
-                                                        onClick={(e) => { e.stopPropagation(); setShowAllTasks(true); }}
-                                                        className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                                                    >
-                                                        Show {hiddenCount} more tasks...
-                                                    </button>
+                                                {/* AI Explanation section for target */}
+                                                {hasAgent && (
+                                                    <div className="mb-3 pb-3 border-b border-border/50 text-xs">
+                                                        {explanation ? (
+                                                            <div className="flex gap-2">
+                                                                <span className="text-primary shrink-0 font-medium">AI:</span>
+                                                                <span className="text-foreground whitespace-pre-wrap">{explanation}</span>
+                                                            </div>
+                                                        ) : isLoadingExplanation ? (
+                                                            <div className="flex items-center gap-2 text-muted-foreground">
+                                                                <Loader className="h-3 w-3" />
+                                                                <span>Asking AI about this target...</span>
+                                                            </div>
+                                                        ) : (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); handleRequestExplain(); }}
+                                                                className="flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors"
+                                                            >
+                                                                <QuestionMark className="h-3 w-3" />
+                                                                <span>Explain this target</span>
+                                                            </button>
+                                                        )}
+                                                    </div>
                                                 )}
-                                                {showAllTasks && hiddenCount > 0 && (
-                                                    <button
-                                                        onClick={(e) => { e.stopPropagation(); setShowAllTasks(false); }}
-                                                        className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                                                    >
-                                                        Show less
-                                                    </button>
+                                                {target.tasks && target.tasks.length > 0 && (
+                                                    <>
+                                                        <div className="space-y-1 max-h-80 overflow-y-auto scrollbar-thin">
+                                                            {visibleTasks?.map((task, i) => (
+                                                                <TaskItem key={task.signature || i} task={task} selectedAgent={selectedAgent} hasAgent={hasAgent} />
+                                                            ))}
+                                                        </div>
+                                                        {!showAllTasks && hiddenCount > 0 && (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setShowAllTasks(true); }}
+                                                                className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                                            >
+                                                                Show {hiddenCount} more tasks...
+                                                            </button>
+                                                        )}
+                                                        {showAllTasks && hiddenCount > 0 && (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setShowAllTasks(false); }}
+                                                                className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                                            >
+                                                                Show less
+                                                            </button>
+                                                        )}
+                                                    </>
                                                 )}
                                             </CardContent>
                                         )}
@@ -1043,7 +1126,7 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Main Build View
-                const BuildView = ({ build, onExplain, hasAgent }) => {
+                const BuildView = ({ build, selectedAgent, hasAgent }) => {
                     if (!build) {
                         return (
                             <Card className="p-8">
@@ -1149,7 +1232,7 @@ final class HTTPServer: @unchecked Sendable {
                                                     buildDuration={build.durationSeconds}
                                                     isFirst={i === 0}
                                                     isLast={i === sortedTargets.length - 1}
-                                                    onExplain={onExplain}
+                                                    selectedAgent={selectedAgent}
                                                     hasAgent={hasAgent}
                                                 />
                                             ))}
@@ -1168,68 +1251,6 @@ final class HTTPServer: @unchecked Sendable {
                     const [selectedBuild, setSelectedBuild] = useState(null);
                     const [agents, setAgents] = useState([]);
                     const [selectedAgent, setSelectedAgent] = useState(null);
-
-                    // Explain modal state
-                    const [explainModalOpen, setExplainModalOpen] = useState(false);
-                    const [explainLoading, setExplainLoading] = useState(false);
-                    const [explainItem, setExplainItem] = useState(null);
-                    const [explanation, setExplanation] = useState('');
-                    const [explainRequestId, setExplainRequestId] = useState(null);
-
-                    const handleCloseExplain = useCallback(async () => {
-                        // Cancel the request if still loading
-                        if (explainLoading && explainRequestId) {
-                            try {
-                                await fetch('/api/explain/cancel', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ requestId: explainRequestId })
-                                });
-                            } catch (e) {
-                                console.error('Failed to cancel request:', e);
-                            }
-                        }
-                        setExplainModalOpen(false);
-                        setExplainLoading(false);
-                        setExplainRequestId(null);
-                    }, [explainLoading, explainRequestId]);
-
-                    const handleExplain = useCallback(async (item) => {
-                        if (!selectedAgent) return;
-
-                        const requestId = Math.random().toString(36).substring(2, 15);
-                        setExplainRequestId(requestId);
-                        setExplainItem(item);
-                        setExplainModalOpen(true);
-                        setExplainLoading(true);
-                        setExplanation('');
-
-                        try {
-                            const response = await fetch('/api/explain', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    agentId: selectedAgent,
-                                    type: item.type,
-                                    name: item.name,
-                                    ruleInfo: item.ruleInfo || '',
-                                    taskType: item.taskType || '',
-                                    requestId: requestId
-                                })
-                            });
-                            const data = await response.json();
-                            // Only update if this is still the current request
-                            if (data.requestId === requestId) {
-                                setExplanation(data.explanation || 'No explanation available.');
-                            }
-                        } catch (e) {
-                            if (e.name !== 'AbortError') {
-                                setExplanation('Failed to get explanation: ' + e.message);
-                            }
-                        } finally {
-                            setExplainLoading(false);
-                        }
-                    }, [selectedAgent]);
 
                     const fetchData = useCallback(async () => {
                         try {
@@ -1306,7 +1327,7 @@ final class HTTPServer: @unchecked Sendable {
 
                             {/* Main */}
                             <main className="container max-w-screen-xl mx-auto px-4 py-6">
-                                <BuildView build={displayBuild} onExplain={handleExplain} hasAgent={!!selectedAgent} />
+                                <BuildView build={displayBuild} selectedAgent={selectedAgent} hasAgent={!!selectedAgent} />
 
                                 {/* Build History */}
                                 {builds.length > 0 && (
@@ -1349,16 +1370,6 @@ final class HTTPServer: @unchecked Sendable {
                                     </div>
                                 )}
                             </main>
-
-                            {/* Explain Modal */}
-                            <Modal
-                                isOpen={explainModalOpen}
-                                onClose={handleCloseExplain}
-                                title={explainItem ? `Explain: ${explainItem.name}` : 'Explanation'}
-                                isLoading={explainLoading}
-                            >
-                                <p className="whitespace-pre-wrap">{explanation}</p>
-                            </Modal>
                         </div>
                     );
                 }
