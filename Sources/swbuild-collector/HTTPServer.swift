@@ -914,7 +914,9 @@ final class HTTPServer: @unchecked Sendable {
 
                     var numRows = rowEnds.length;
                     var rh = 18;
-                    var height = Math.max(50, numRows * rh + 32);
+                    var maxRows = 15; // Cap at 15 rows to prevent layout shifts
+                    var height = Math.max(50, Math.min(numRows, maxRows) * rh + 32);
+                    var needsScroll = numRows > maxRows;
 
                     // Time labels
                     var durSec = dur / 1000;
@@ -967,7 +969,7 @@ final class HTTPServer: @unchecked Sendable {
                                     </div>
                                     {/* Chart area */}
                                     <div
-                                        className="relative flex-1 bg-secondary/30 rounded overflow-hidden"
+                                        className={'relative flex-1 bg-secondary/30 rounded ' + (needsScroll ? 'overflow-y-auto' : 'overflow-hidden')}
                                         style={{ height: height }}
                                     >
                                         {labels.map(function(l, idx) {
