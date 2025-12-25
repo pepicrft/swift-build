@@ -267,6 +267,8 @@ final class HTTPServer: @unchecked Sendable {
             return await handleExplainRequest(body: body)
         case "/api/explain/cancel":
             return await handleCancelExplain(body: body)
+        case "/api/analyze":
+            return await handleAnalyzeRequest(body: body)
         default:
             return HTTPResponse(status: 404, contentType: "text/plain", body: "Not Found")
         }
@@ -457,6 +459,70 @@ final class HTTPServer: @unchecked Sendable {
         }
 
         return output
+    }
+
+    private func handleAnalyzeRequest(body: String) async -> HTTPResponse {
+        guard let jsonData = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let agentId = json["agentId"] as? String else {
+            return HTTPResponse(status: 400, contentType: "application/json", body: "{\"error\": \"Invalid request body\"}")
+        }
+
+        guard let agent = detectedAgents.first(where: { $0.id == agentId }) else {
+            return HTTPResponse(status: 404, contentType: "application/json", body: "{\"error\": \"Agent not found\"}")
+        }
+
+        // Extract build analysis context
+        let configuration = json["configuration"] as? String ?? "Unknown"
+        let action = json["action"] as? String ?? "build"
+        let duration = json["duration"] as? Double ?? 0
+        let targetCount = json["targetCount"] as? Int ?? 0
+        let taskCount = json["taskCount"] as? Int ?? 0
+        let cachedCount = json["cachedCount"] as? Int ?? 0
+        let slowTasks = json["slowTasks"] as? [[String: Any]] ?? []
+        let targetDurations = json["targetDurations"] as? [String] ?? []
+        let currentInsights = json["currentInsights"] as? [String] ?? []
+
+        // Build a detailed prompt for AI analysis
+        var slowTasksDesc = ""
+        for task in slowTasks.prefix(10) {
+            if let name = task["name"] as? String,
+               let dur = task["duration"] as? Double,
+               let target = task["target"] as? String {
+                slowTasksDesc += "  - \(name) (\(String(format: "%.1f", dur))s) in \(target)\n"
+            }
+        }
+
+        let prompt = """
+        Analyze this Xcode/Swift build and provide 3-5 specific, actionable recommendations to improve build time.
+
+        Build Summary:
+        - Configuration: \(configuration) \(action)
+        - Duration: \(String(format: "%.1f", duration)) seconds
+        - Targets: \(targetCount)
+        - Tasks: \(taskCount) total (\(cachedCount) cached, \(Int((Double(cachedCount) / max(1, Double(taskCount))) * 100))% cache hit rate)
+
+        Target Durations:
+        \(targetDurations.prefix(10).joined(separator: "\n"))
+
+        Slowest Tasks:
+        \(slowTasksDesc.isEmpty ? "  (no slow tasks detected)" : slowTasksDesc)
+
+        Current Insights Detected:
+        \(currentInsights.isEmpty ? "  (none)" : currentInsights.map { "  - " + $0 }.joined(separator: "\n"))
+
+        Focus your recommendations on:
+        1. Compilation bottlenecks and slow files
+        2. Module organization and dependency structure
+        3. Caching opportunities and build settings
+        4. Parallelism improvements
+
+        Be specific with file names and settings where possible. Format as a numbered list.
+        """
+
+        let requestId = UUID().uuidString
+        let analysis = await invokeAgent(agent: agent, prompt: prompt, requestId: requestId)
+        return jsonResponse(["analysis": analysis, "requestId": requestId])
     }
 
     private func jsonResponse(_ data: Any?) -> HTTPResponse {
@@ -768,6 +834,43 @@ final class HTTPServer: @unchecked Sendable {
                     </svg>
                 );
 
+                const Lightbulb = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                );
+
+                const Sparkles = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                    </svg>
+                );
+
+                const Settings = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                );
+
+                const AlertTriangle = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                );
+
+                const Activity = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                    </svg>
+                );
+
+                const Zap = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                );
+
                 // Badge Component
                 const Badge = ({ children, variant = 'default', className = '' }) => {
                     const variants = {
@@ -845,6 +948,369 @@ final class HTTPServer: @unchecked Sendable {
                     { bg: 'rgb(168, 85, 247)', light: 'rgba(168, 85, 247, 0.2)', name: 'purple' },
                     { bg: 'rgb(6, 182, 212)', light: 'rgba(6, 182, 212, 0.2)', name: 'cyan' },
                 ];
+
+                // ============ BUILD INSIGHTS ANALYSIS ============
+
+                // Analyze compilation bottlenecks
+                function analyzeBottlenecks(build) {
+                    var insights = [];
+                    if (!build || !build.targets) return insights;
+
+                    var totalDuration = build.durationSeconds || 0;
+                    var allTasks = [];
+
+                    // Collect all tasks with timing info
+                    for (var i = 0; i < build.targets.length; i++) {
+                        var target = build.targets[i];
+                        var tasks = target.tasks || [];
+                        for (var j = 0; j < tasks.length; j++) {
+                            var task = tasks[j];
+                            if (task.durationSeconds && task.durationSeconds > 0) {
+                                allTasks.push({
+                                    name: getReadableRuleName(task.ruleInfo, task.type),
+                                    duration: task.durationSeconds,
+                                    targetName: target.name,
+                                    type: task.type
+                                });
+                            }
+                        }
+
+                        // Check target bottlenecks
+                        if (target.durationSeconds && totalDuration > 0) {
+                            var targetPct = (target.durationSeconds / totalDuration) * 100;
+                            if (targetPct > 40) {
+                                insights.push({
+                                    id: 'target-bottleneck-' + target.name,
+                                    category: 'bottleneck',
+                                    severity: 'warning',
+                                    title: 'Target bottleneck: ' + target.name,
+                                    description: 'This target consumes ' + Math.round(targetPct) + '% of total build time',
+                                    metric: formatDuration(target.durationSeconds),
+                                    suggestion: 'Consider splitting into smaller modules or optimizing slow files'
+                                });
+                            }
+                        }
+                    }
+
+                    // Find slow individual tasks (>5s)
+                    allTasks.sort(function(a, b) { return b.duration - a.duration; });
+                    var slowThreshold = 5;
+                    for (var k = 0; k < Math.min(3, allTasks.length); k++) {
+                        var t = allTasks[k];
+                        if (t.duration >= slowThreshold) {
+                            insights.push({
+                                id: 'slow-task-' + k,
+                                category: 'bottleneck',
+                                severity: t.duration > 10 ? 'critical' : 'warning',
+                                title: 'Slow compilation: ' + t.name,
+                                description: 'Takes ' + formatDuration(t.duration) + ' in target ' + t.targetName,
+                                metric: formatDuration(t.duration),
+                                suggestion: 'Consider breaking up large files or reducing dependencies'
+                            });
+                        }
+                    }
+
+                    return insights;
+                }
+
+                // Analyze cache effectiveness
+                function analyzeCacheEffectiveness(build) {
+                    var insights = [];
+                    if (!build) return insights;
+
+                    var totalTasks = build.totalTaskCount || 0;
+                    var cachedTasks = 0;
+
+                    if (build.targets) {
+                        for (var i = 0; i < build.targets.length; i++) {
+                            var tasks = build.targets[i].tasks || [];
+                            for (var j = 0; j < tasks.length; j++) {
+                                if (tasks[j].status === 'cached') {
+                                    cachedTasks++;
+                                }
+                            }
+                        }
+                    }
+
+                    if (totalTasks > 10) {
+                        var cacheRatio = Math.round((cachedTasks / totalTasks) * 100);
+                        if (cacheRatio < 30 && build.durationSeconds > 30) {
+                            insights.push({
+                                id: 'low-cache-ratio',
+                                category: 'cache',
+                                severity: 'warning',
+                                title: 'Low cache hit ratio: ' + cacheRatio + '%',
+                                description: cachedTasks + ' of ' + totalTasks + ' tasks were cached',
+                                metric: cacheRatio + '%',
+                                suggestion: 'Enable compilation caching with SWIFTBUILD_ENABLE_CACHING=1'
+                            });
+                        } else if (cacheRatio >= 70) {
+                            insights.push({
+                                id: 'good-cache-ratio',
+                                category: 'cache',
+                                severity: 'info',
+                                title: 'Good cache utilization: ' + cacheRatio + '%',
+                                description: cachedTasks + ' of ' + totalTasks + ' tasks were cached',
+                                metric: cacheRatio + '%',
+                                suggestion: null
+                            });
+                        }
+                    }
+
+                    return insights;
+                }
+
+                // Analyze parallelism
+                function analyzeParallelism(build) {
+                    var insights = [];
+                    if (!build || !build.targets || build.durationSeconds < 5) return insights;
+
+                    // Compute parallelism metrics from task timing
+                    var allTasks = [];
+                    for (var i = 0; i < build.targets.length; i++) {
+                        var tasks = build.targets[i].tasks || [];
+                        for (var j = 0; j < tasks.length; j++) {
+                            var task = tasks[j];
+                            if (task.startTime && task.endTime) {
+                                allTasks.push({
+                                    start: new Date(task.startTime).getTime(),
+                                    end: new Date(task.endTime).getTime()
+                                });
+                            }
+                        }
+                    }
+
+                    if (allTasks.length < 5) return insights;
+
+                    // Sample parallelism at 100ms intervals
+                    var timestamps = allTasks.flatMap(function(t) { return [t.start, t.end]; });
+                    var minT = Math.min.apply(null, timestamps);
+                    var maxT = Math.max.apply(null, timestamps);
+                    var samples = [];
+                    var peak = 0;
+
+                    for (var t = minT; t <= maxT; t += 100) {
+                        var concurrent = 0;
+                        for (var k = 0; k < allTasks.length; k++) {
+                            if (allTasks[k].start <= t && allTasks[k].end > t) {
+                                concurrent++;
+                            }
+                        }
+                        samples.push(concurrent);
+                        if (concurrent > peak) peak = concurrent;
+                    }
+
+                    var avg = samples.reduce(function(a, b) { return a + b; }, 0) / samples.length;
+                    var utilization = peak > 0 ? Math.round((avg / peak) * 100) : 0;
+
+                    if (peak > 1 && utilization < 50) {
+                        insights.push({
+                            id: 'low-parallelism',
+                            category: 'parallelism',
+                            severity: 'warning',
+                            title: 'Underutilized parallelism',
+                            description: 'Peak: ' + peak + ' concurrent, but average only ' + avg.toFixed(1),
+                            metric: utilization + '% utilized',
+                            suggestion: 'Build has sequential bottlenecks limiting parallelism'
+                        });
+                    } else if (peak >= 4 && utilization >= 60) {
+                        insights.push({
+                            id: 'good-parallelism',
+                            category: 'parallelism',
+                            severity: 'info',
+                            title: 'Good parallelism: ' + peak + ' peak concurrent',
+                            description: 'Average ' + avg.toFixed(1) + ' concurrent tasks (' + utilization + '% utilization)',
+                            metric: peak + ' peak',
+                            suggestion: null
+                        });
+                    }
+
+                    return insights;
+                }
+
+                // Analyze configuration suggestions
+                function analyzeConfiguration(build) {
+                    var insights = [];
+                    if (!build) return insights;
+
+                    // Check if caching seems disabled (no cached tasks in a long build)
+                    var hasCachedTasks = false;
+                    if (build.targets) {
+                        outer: for (var i = 0; i < build.targets.length; i++) {
+                            var tasks = build.targets[i].tasks || [];
+                            for (var j = 0; j < tasks.length; j++) {
+                                if (tasks[j].status === 'cached') {
+                                    hasCachedTasks = true;
+                                    break outer;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!hasCachedTasks && build.durationSeconds > 60 && build.totalTaskCount > 50) {
+                        insights.push({
+                            id: 'enable-caching',
+                            category: 'config',
+                            severity: 'info',
+                            title: 'Consider enabling compilation caching',
+                            description: 'No cached tasks detected in this ' + formatDuration(build.durationSeconds) + ' build',
+                            metric: null,
+                            suggestion: 'Run with SWIFTBUILD_ENABLE_CACHING=1 for faster incremental builds'
+                        });
+                    }
+
+                    return insights;
+                }
+
+                // Combine all insights
+                function computeInsights(build) {
+                    if (!build) return [];
+                    return [].concat(
+                        analyzeBottlenecks(build),
+                        analyzeCacheEffectiveness(build),
+                        analyzeParallelism(build),
+                        analyzeConfiguration(build)
+                    );
+                }
+
+                // Build Insights Component
+                const BuildInsights = function(props) {
+                    const build = props.build;
+                    const selectedAgent = props.selectedAgent;
+                    const hasAgent = props.hasAgent;
+                    const [aiAnalysis, setAiAnalysis] = useState(null);
+                    const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+                    // Compute insights with memoization
+                    const insights = useMemo(function() {
+                        return computeInsights(build);
+                    }, [build && build.sessionID, build && build.totalTaskCount, build && build.completedTaskCount, build && build.durationSeconds]);
+
+                    // Request AI analysis
+                    const requestAiAnalysis = async function() {
+                        if (!selectedAgent || isAnalyzing || !build) return;
+                        setIsAnalyzing(true);
+                        setAiAnalysis(null);
+
+                        try {
+                            // Gather build context for AI
+                            var slowTasks = [];
+                            var targetDurations = [];
+                            if (build.targets) {
+                                for (var i = 0; i < build.targets.length; i++) {
+                                    var target = build.targets[i];
+                                    targetDurations.push(target.name + ': ' + formatDuration(target.durationSeconds || 0));
+                                    var tasks = target.tasks || [];
+                                    for (var j = 0; j < tasks.length; j++) {
+                                        var task = tasks[j];
+                                        if (task.durationSeconds && task.durationSeconds > 2) {
+                                            slowTasks.push({
+                                                name: getReadableRuleName(task.ruleInfo, task.type),
+                                                duration: task.durationSeconds,
+                                                target: target.name
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            slowTasks.sort(function(a, b) { return b.duration - a.duration; });
+
+                            var cachedCount = 0;
+                            if (build.targets) {
+                                for (var i = 0; i < build.targets.length; i++) {
+                                    var tasks = build.targets[i].tasks || [];
+                                    for (var j = 0; j < tasks.length; j++) {
+                                        if (tasks[j].status === 'cached') cachedCount++;
+                                    }
+                                }
+                            }
+
+                            var response = await fetch('/api/analyze', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    agentId: selectedAgent,
+                                    sessionID: build.sessionID,
+                                    configuration: build.configuration,
+                                    action: build.action,
+                                    duration: build.durationSeconds,
+                                    targetCount: build.targetCount,
+                                    taskCount: build.totalTaskCount,
+                                    cachedCount: cachedCount,
+                                    slowTasks: slowTasks.slice(0, 10),
+                                    targetDurations: targetDurations,
+                                    currentInsights: insights.map(function(i) { return i.title; })
+                                })
+                            });
+                            var data = await response.json();
+                            setAiAnalysis(data.analysis || 'No analysis available.');
+                        } catch (e) {
+                            setAiAnalysis('Failed to get AI analysis: ' + e.message);
+                        } finally {
+                            setIsAnalyzing(false);
+                        }
+                    };
+
+                    if (!build || insights.length === 0) return null;
+
+                    var severityIcon = function(severity) {
+                        if (severity === 'critical') return React.createElement(AlertTriangle, { className: 'h-4 w-4 text-red-500' });
+                        if (severity === 'warning') return React.createElement(AlertTriangle, { className: 'h-4 w-4 text-amber-500' });
+                        return React.createElement(Lightbulb, { className: 'h-4 w-4 text-blue-500' });
+                    };
+
+                    var categoryIcon = function(category) {
+                        if (category === 'bottleneck') return React.createElement(Clock, { className: 'h-3 w-3 text-muted-foreground' });
+                        if (category === 'cache') return React.createElement(Zap, { className: 'h-3 w-3 text-muted-foreground' });
+                        if (category === 'parallelism') return React.createElement(Activity, { className: 'h-3 w-3 text-muted-foreground' });
+                        return React.createElement(Settings, { className: 'h-3 w-3 text-muted-foreground' });
+                    };
+
+                    return React.createElement(Card, { className: 'border-blue-200 bg-blue-50/30' },
+                        React.createElement(CardHeader, { className: 'pb-2' },
+                            React.createElement('div', { className: 'flex items-center justify-between' },
+                                React.createElement('div', { className: 'flex items-center gap-2' },
+                                    React.createElement(Lightbulb, { className: 'h-5 w-5 text-blue-600' }),
+                                    React.createElement(CardTitle, { className: 'text-base' }, 'Build Insights')
+                                ),
+                                hasAgent && React.createElement('button', {
+                                    onClick: requestAiAnalysis,
+                                    disabled: isAnalyzing,
+                                    className: 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
+                                },
+                                    isAnalyzing ? React.createElement(Loader, { className: 'h-3 w-3 animate-spin' }) : React.createElement(Sparkles, { className: 'h-3 w-3' }),
+                                    isAnalyzing ? 'Analyzing...' : 'AI Analysis'
+                                )
+                            )
+                        ),
+                        React.createElement(CardContent, { className: 'pt-0' },
+                            React.createElement('div', { className: 'space-y-2' },
+                                insights.map(function(insight) {
+                                    return React.createElement('div', {
+                                        key: insight.id,
+                                        className: 'flex items-start gap-2 p-2 rounded-md bg-background/60'
+                                    },
+                                        severityIcon(insight.severity),
+                                        React.createElement('div', { className: 'flex-1 min-w-0' },
+                                            React.createElement('div', { className: 'flex items-center gap-2' },
+                                                React.createElement('span', { className: 'text-sm font-medium' }, insight.title),
+                                                insight.metric && React.createElement('span', { className: 'text-xs px-1.5 py-0.5 rounded bg-secondary text-muted-foreground' }, insight.metric)
+                                            ),
+                                            insight.suggestion && React.createElement('p', { className: 'text-xs text-muted-foreground mt-0.5' }, insight.suggestion)
+                                        )
+                                    );
+                                })
+                            ),
+                            aiAnalysis && React.createElement('div', { className: 'mt-3 p-3 rounded-md bg-background border' },
+                                React.createElement('div', { className: 'flex items-center gap-2 mb-2' },
+                                    React.createElement(Sparkles, { className: 'h-4 w-4 text-blue-600' }),
+                                    React.createElement('span', { className: 'text-sm font-medium' }, 'AI Recommendations')
+                                ),
+                                React.createElement('p', { className: 'text-sm text-muted-foreground whitespace-pre-wrap' }, aiAnalysis)
+                            )
+                        )
+                    );
+                };
 
                 // Parallelism Timeline Component (like Xcode Build Timeline)
                 const ParallelismTimeline = function(props) {
@@ -1613,6 +2079,9 @@ final class HTTPServer: @unchecked Sendable {
 
                     return (
                         <div className="space-y-4">
+                            {/* Build Insights - at the top */}
+                            <BuildInsights build={build} selectedAgent={selectedAgent} hasAgent={hasAgent} />
+
                             {/* Header Card */}
                             <Card>
                                 <CardHeader>
