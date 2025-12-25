@@ -50,24 +50,34 @@ sleep 0.5  # Give it time to start
 # Open the web UI in the browser
 open "http://localhost:$PORT"
 
-# Run xcodebuild with the custom build service and caching enabled
-echo "Running xcodebuild with Swift Build (compilation caching enabled)..."
-echo ""
-
-# Trap to handle interruption and notify collector
+# Trap to handle interruption
 cleanup() {
     echo ""
     echo "Build interrupted."
 }
 trap cleanup INT TERM
 
+# Check if caching is enabled via environment variable
+if [ "${SWIFTBUILD_ENABLE_CACHING:-0}" = "1" ]; then
+    echo "Running xcodebuild with Swift Build (compilation caching enabled)..."
+    echo ""
+    CACHE_SETTINGS=(
+        COMPILATION_CACHE_ENABLE_CACHING=YES
+        COMPILATION_CACHE_ENABLE_PLUGIN=YES
+        SWIFT_ENABLE_COMPILE_CACHE=YES
+        SWIFT_ENABLE_EXPLICIT_MODULES=YES
+        CLANG_ENABLE_COMPILE_CACHE=YES
+        CLANG_ENABLE_MODULES=YES
+    )
+else
+    echo "Running xcodebuild with Swift Build..."
+    echo "(Set SWIFTBUILD_ENABLE_CACHING=1 to enable compilation caching)"
+    echo ""
+    CACHE_SETTINGS=()
+fi
+
 env XCBBUILDSERVICE_PATH="$BUILD_SERVICE_PATH" \
     SWIFTBUILD_TELEMETRY_SOCKET="$SOCKET_PATH" \
     /usr/bin/xcrun xcodebuild \
-        COMPILATION_CACHE_ENABLE_CACHING=YES \
-        COMPILATION_CACHE_ENABLE_PLUGIN=YES \
-        SWIFT_ENABLE_COMPILE_CACHE=YES \
-        SWIFT_ENABLE_EXPLICIT_MODULES=YES \
-        CLANG_ENABLE_COMPILE_CACHE=YES \
-        CLANG_ENABLE_MODULES=YES \
+        "${CACHE_SETTINGS[@]}" \
         "$@"
