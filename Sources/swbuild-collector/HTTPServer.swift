@@ -32,6 +32,30 @@ struct CodingAgent {
     }
 }
 
+/// Actor to manage running explain processes
+actor ExplainProcessManager {
+    private var processes: [String: Process] = [:]
+
+    func register(_ process: Process, id: String) {
+        processes[id] = process
+    }
+
+    func unregister(id: String) {
+        processes.removeValue(forKey: id)
+    }
+
+    func cancel(id: String) -> Bool {
+        if let process = processes[id] {
+            if process.isRunning {
+                process.terminate()
+            }
+            processes.removeValue(forKey: id)
+            return true
+        }
+        return false
+    }
+}
+
 /// Simple HTTP server for the web UI
 final class HTTPServer: @unchecked Sendable {
     let port: Int
@@ -42,6 +66,9 @@ final class HTTPServer: @unchecked Sendable {
 
     /// Cached list of detected agents
     private var detectedAgents: [CodingAgent] = []
+
+    /// Track running explain processes for cancellation
+    private let processManager = ExplainProcessManager()
 
     init(port: Int, buildStore: BuildStore) {
         self.port = port
@@ -238,9 +265,22 @@ final class HTTPServer: @unchecked Sendable {
         switch path {
         case "/api/explain":
             return await handleExplainRequest(body: body)
+        case "/api/explain/cancel":
+            return await handleCancelExplain(body: body)
         default:
             return HTTPResponse(status: 404, contentType: "text/plain", body: "Not Found")
         }
+    }
+
+    private func handleCancelExplain(body: String) async -> HTTPResponse {
+        guard let jsonData = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let requestId = json["requestId"] as? String else {
+            return HTTPResponse(status: 400, contentType: "application/json", body: "{\"error\": \"Invalid request body\"}")
+        }
+
+        let cancelled = await processManager.cancel(id: requestId)
+        return jsonResponse(["cancelled": cancelled])
     }
 
     private func handleExplainRequest(body: String) async -> HTTPResponse {
@@ -252,6 +292,9 @@ final class HTTPServer: @unchecked Sendable {
               let itemName = json["name"] as? String else {
             return HTTPResponse(status: 400, contentType: "application/json", body: "{\"error\": \"Invalid request body\"}")
         }
+
+        // Get or generate request ID for cancellation support
+        let requestId = json["requestId"] as? String ?? UUID().uuidString
 
         // Find the agent
         guard let agent = detectedAgents.first(where: { $0.id == agentId }) else {
@@ -281,11 +324,11 @@ final class HTTPServer: @unchecked Sendable {
         }
 
         // Invoke the agent
-        let explanation = await invokeAgent(agent: agent, prompt: prompt)
-        return jsonResponse(["explanation": explanation])
+        let explanation = await invokeAgent(agent: agent, prompt: prompt, requestId: requestId)
+        return jsonResponse(["explanation": explanation, "requestId": requestId])
     }
 
-    private func invokeAgent(agent: CodingAgent, prompt: String) async -> String {
+    private func invokeAgent(agent: CodingAgent, prompt: String, requestId: String) async -> String {
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -334,20 +377,35 @@ final class HTTPServer: @unchecked Sendable {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        // Register process for cancellation
+        await processManager.register(process, id: requestId)
+
+        defer {
+            // Cleanup: remove process from tracking
+            Task {
+                await processManager.unregister(id: requestId)
+            }
+        }
+
         do {
             try process.run()
 
             // Set a timeout
             let deadline = DispatchTime.now() + .seconds(30)
-            DispatchQueue.global().asyncAfter(deadline: deadline) {
-                if process.isRunning {
-                    process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: deadline) { [weak process] in
+                if let p = process, p.isRunning {
+                    p.terminate()
                 }
             }
 
             process.waitUntilExit()
         } catch {
             return "Failed to run \(agent.name): \(error.localizedDescription)"
+        }
+
+        // Check if process was terminated (cancelled)
+        if process.terminationStatus == 15 || process.terminationStatus == 9 {
+            return "Request cancelled"
         }
 
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -1116,10 +1174,31 @@ final class HTTPServer: @unchecked Sendable {
                     const [explainLoading, setExplainLoading] = useState(false);
                     const [explainItem, setExplainItem] = useState(null);
                     const [explanation, setExplanation] = useState('');
+                    const [explainRequestId, setExplainRequestId] = useState(null);
+
+                    const handleCloseExplain = useCallback(async () => {
+                        // Cancel the request if still loading
+                        if (explainLoading && explainRequestId) {
+                            try {
+                                await fetch('/api/explain/cancel', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ requestId: explainRequestId })
+                                });
+                            } catch (e) {
+                                console.error('Failed to cancel request:', e);
+                            }
+                        }
+                        setExplainModalOpen(false);
+                        setExplainLoading(false);
+                        setExplainRequestId(null);
+                    }, [explainLoading, explainRequestId]);
 
                     const handleExplain = useCallback(async (item) => {
                         if (!selectedAgent) return;
 
+                        const requestId = Math.random().toString(36).substring(2, 15);
+                        setExplainRequestId(requestId);
                         setExplainItem(item);
                         setExplainModalOpen(true);
                         setExplainLoading(true);
@@ -1134,13 +1213,19 @@ final class HTTPServer: @unchecked Sendable {
                                     type: item.type,
                                     name: item.name,
                                     ruleInfo: item.ruleInfo || '',
-                                    taskType: item.taskType || ''
+                                    taskType: item.taskType || '',
+                                    requestId: requestId
                                 })
                             });
                             const data = await response.json();
-                            setExplanation(data.explanation || 'No explanation available.');
+                            // Only update if this is still the current request
+                            if (data.requestId === requestId) {
+                                setExplanation(data.explanation || 'No explanation available.');
+                            }
                         } catch (e) {
-                            setExplanation('Failed to get explanation: ' + e.message);
+                            if (e.name !== 'AbortError') {
+                                setExplanation('Failed to get explanation: ' + e.message);
+                            }
                         } finally {
                             setExplainLoading(false);
                         }
@@ -1268,7 +1353,7 @@ final class HTTPServer: @unchecked Sendable {
                             {/* Explain Modal */}
                             <Modal
                                 isOpen={explainModalOpen}
-                                onClose={() => setExplainModalOpen(false)}
+                                onClose={handleCloseExplain}
                                 title={explainItem ? `Explain: ${explainItem.name}` : 'Explanation'}
                                 isLoading={explainLoading}
                             >
