@@ -167,10 +167,21 @@ final class HTTPServer: @unchecked Sendable {
         let method = String(parts[0])
         let path = String(parts[1])
 
+        // Extract body for POST requests
+        var body = ""
+        if method == "POST" {
+            // Find the empty line that separates headers from body
+            if let bodyStart = requestString.range(of: "\r\n\r\n") {
+                body = String(requestString[bodyStart.upperBound...])
+            }
+        }
+
         // Route request
         let response: HTTPResponse
         if method == "GET" {
             response = await handleGET(path: path)
+        } else if method == "POST" {
+            response = await handlePOST(path: path, body: body)
         } else {
             response = HTTPResponse(status: 405, contentType: "text/plain", body: "Method Not Allowed")
         }
@@ -221,6 +232,137 @@ final class HTTPServer: @unchecked Sendable {
         default:
             return HTTPResponse(status: 404, contentType: "text/plain", body: "Not Found")
         }
+    }
+
+    private func handlePOST(path: String, body: String) async -> HTTPResponse {
+        switch path {
+        case "/api/explain":
+            return await handleExplainRequest(body: body)
+        default:
+            return HTTPResponse(status: 404, contentType: "text/plain", body: "Not Found")
+        }
+    }
+
+    private func handleExplainRequest(body: String) async -> HTTPResponse {
+        // Parse the request body
+        guard let jsonData = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let agentId = json["agentId"] as? String,
+              let itemType = json["type"] as? String,
+              let itemName = json["name"] as? String else {
+            return HTTPResponse(status: 400, contentType: "application/json", body: "{\"error\": \"Invalid request body\"}")
+        }
+
+        // Find the agent
+        guard let agent = detectedAgents.first(where: { $0.id == agentId }) else {
+            return HTTPResponse(status: 400, contentType: "application/json", body: "{\"error\": \"Agent not found\"}")
+        }
+
+        // Build context from additional info
+        let ruleInfo = json["ruleInfo"] as? String ?? ""
+        let taskType = json["taskType"] as? String ?? ""
+
+        // Build the prompt
+        let prompt: String
+        if itemType == "task" {
+            prompt = """
+            Explain this Xcode build task in simple terms (2-3 sentences max):
+            Task: \(itemName)
+            Rule: \(ruleInfo.isEmpty ? "N/A" : ruleInfo)
+            Type: \(taskType.isEmpty ? "N/A" : taskType)
+            What does this task do in the context of building an iOS/macOS app?
+            """
+        } else {
+            prompt = """
+            Explain this Xcode build target in simple terms (2-3 sentences max):
+            Target: \(itemName)
+            What is this target's purpose in an iOS/macOS project?
+            """
+        }
+
+        // Invoke the agent
+        let explanation = await invokeAgent(agent: agent, prompt: prompt)
+        return jsonResponse(["explanation": explanation])
+    }
+
+    private func invokeAgent(agent: CodingAgent, prompt: String) async -> String {
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+
+        // Determine the command to run
+        let commandParts = agent.command.split(separator: " ")
+        let executable = String(commandParts.first ?? "")
+
+        // Find the full path using which
+        let whichProcess = Process()
+        let whichPipe = Pipe()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichProcess.arguments = [executable]
+        whichProcess.standardOutput = whichPipe
+        whichProcess.standardError = FileHandle.nullDevice
+
+        do {
+            try whichProcess.run()
+            whichProcess.waitUntilExit()
+        } catch {
+            return "Could not find \(agent.name) executable."
+        }
+
+        let whichData = whichPipe.fileHandleForReading.readDataToEndOfFile()
+        let executablePath = String(data: whichData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard !executablePath.isEmpty else {
+            return "Could not find \(agent.name) executable."
+        }
+
+        process.executableURL = URL(fileURLWithPath: executablePath)
+
+        // Build arguments based on agent type
+        switch agent.id {
+        case "claude":
+            process.arguments = ["--print", prompt]
+        case "codex":
+            process.arguments = ["--prompt", prompt]
+        case "aider":
+            process.arguments = ["--message", prompt, "--yes"]
+        default:
+            // Generic fallback
+            process.arguments = [prompt]
+        }
+
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+
+            // Set a timeout
+            let deadline = DispatchTime.now() + .seconds(30)
+            DispatchQueue.global().asyncAfter(deadline: deadline) {
+                if process.isRunning {
+                    process.terminate()
+                }
+            }
+
+            process.waitUntilExit()
+        } catch {
+            return "Failed to run \(agent.name): \(error.localizedDescription)"
+        }
+
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if output.isEmpty {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !errorOutput.isEmpty {
+                return "Error from \(agent.name): \(errorOutput)"
+            }
+            return "No response from \(agent.name)"
+        }
+
+        return output
     }
 
     private func jsonResponse(_ data: Any?) -> HTTPResponse {
@@ -491,6 +633,44 @@ final class HTTPServer: @unchecked Sendable {
                     </svg>
                 );
 
+                const QuestionMark = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                );
+
+                const XMark = ({ className }) => (
+                    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                );
+
+                // Modal Component
+                const Modal = ({ isOpen, onClose, title, children, isLoading }) => {
+                    if (!isOpen) return null;
+                    return (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center">
+                            <div className="fixed inset-0 bg-black/50" onClick={onClose} />
+                            <div className="relative bg-background rounded-lg shadow-lg border border-border max-w-md w-full mx-4 p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="font-semibold text-sm">{title}</h3>
+                                    <button onClick={onClose} className="p-1 hover:bg-secondary rounded">
+                                        <XMark className="h-4 w-4" />
+                                    </button>
+                                </div>
+                                <div className="text-sm text-muted-foreground">
+                                    {isLoading ? (
+                                        <div className="flex items-center gap-2">
+                                            <Loader className="h-4 w-4" />
+                                            <span>Asking AI assistant...</span>
+                                        </div>
+                                    ) : children}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                };
+
                 // Badge Component
                 const Badge = ({ children, variant = 'default', className = '' }) => {
                     const variants = {
@@ -606,9 +786,21 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Task Item in Timeline
-                const TaskItem = ({ task, showDetail = false }) => {
+                const TaskItem = ({ task, showDetail = false, onExplain, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
                     const readableName = getReadableRuleName(task.ruleInfo, task.type);
+
+                    const handleExplain = (e) => {
+                        e.stopPropagation();
+                        if (onExplain) {
+                            onExplain({
+                                type: 'task',
+                                name: readableName,
+                                ruleInfo: task.ruleInfo || '',
+                                taskType: task.type || ''
+                            });
+                        }
+                    };
 
                     return (
                         <div className="group">
@@ -625,6 +817,15 @@ final class HTTPServer: @unchecked Sendable {
                                 {task.durationSeconds != null && (
                                     <span className="text-[10px] text-muted-foreground tabular-nums">{formatDuration(task.durationSeconds)}</span>
                                 )}
+                                {hasAgent && (
+                                    <span
+                                        onClick={handleExplain}
+                                        className="p-0.5 rounded hover:bg-primary/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="Explain this task"
+                                    >
+                                        <QuestionMark className="h-3 w-3 text-muted-foreground hover:text-primary" />
+                                    </span>
+                                )}
                                 <ChevronRight className={`h-3 w-3 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
                             </button>
                             <TaskDetail task={task} isExpanded={expanded} />
@@ -633,9 +834,19 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Timeline Target Item
-                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast }) => {
+                const TimelineTarget = ({ target, buildStartTime, buildDuration, isFirst, isLast, onExplain, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
                     const [showAllTasks, setShowAllTasks] = useState(false);
+
+                    const handleExplainTarget = (e) => {
+                        e.stopPropagation();
+                        if (onExplain) {
+                            onExplain({
+                                type: 'target',
+                                name: target.name
+                            });
+                        }
+                    };
 
                     // Calculate timeline position
                     const startOffset = buildStartTime && target.startTime
@@ -690,6 +901,15 @@ final class HTTPServer: @unchecked Sendable {
                                                     <div className="flex items-center gap-2 min-w-0">
                                                         <Package className="h-4 w-4 text-muted-foreground shrink-0" />
                                                         <CardTitle className="text-sm truncate">{target.name}</CardTitle>
+                                                        {hasAgent && (
+                                                            <span
+                                                                onClick={handleExplainTarget}
+                                                                className="p-0.5 rounded hover:bg-primary/10 transition-opacity"
+                                                                title="Explain this target"
+                                                            >
+                                                                <QuestionMark className="h-3.5 w-3.5 text-muted-foreground hover:text-primary" />
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <StatusBadge status={target.status} size="sm" />
@@ -736,7 +956,7 @@ final class HTTPServer: @unchecked Sendable {
                                             <CardContent className="border-t border-border pt-3">
                                                 <div className="space-y-1 max-h-80 overflow-y-auto scrollbar-thin">
                                                     {visibleTasks?.map((task, i) => (
-                                                        <TaskItem key={task.signature || i} task={task} />
+                                                        <TaskItem key={task.signature || i} task={task} onExplain={onExplain} hasAgent={hasAgent} />
                                                     ))}
                                                 </div>
                                                 {!showAllTasks && hiddenCount > 0 && (
@@ -765,7 +985,7 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Main Build View
-                const BuildView = ({ build }) => {
+                const BuildView = ({ build, onExplain, hasAgent }) => {
                     if (!build) {
                         return (
                             <Card className="p-8">
@@ -871,6 +1091,8 @@ final class HTTPServer: @unchecked Sendable {
                                                     buildDuration={build.durationSeconds}
                                                     isFirst={i === 0}
                                                     isLast={i === sortedTargets.length - 1}
+                                                    onExplain={onExplain}
+                                                    hasAgent={hasAgent}
                                                 />
                                             ))}
                                         </div>
@@ -888,6 +1110,41 @@ final class HTTPServer: @unchecked Sendable {
                     const [selectedBuild, setSelectedBuild] = useState(null);
                     const [agents, setAgents] = useState([]);
                     const [selectedAgent, setSelectedAgent] = useState(null);
+
+                    // Explain modal state
+                    const [explainModalOpen, setExplainModalOpen] = useState(false);
+                    const [explainLoading, setExplainLoading] = useState(false);
+                    const [explainItem, setExplainItem] = useState(null);
+                    const [explanation, setExplanation] = useState('');
+
+                    const handleExplain = useCallback(async (item) => {
+                        if (!selectedAgent) return;
+
+                        setExplainItem(item);
+                        setExplainModalOpen(true);
+                        setExplainLoading(true);
+                        setExplanation('');
+
+                        try {
+                            const response = await fetch('/api/explain', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    agentId: selectedAgent,
+                                    type: item.type,
+                                    name: item.name,
+                                    ruleInfo: item.ruleInfo || '',
+                                    taskType: item.taskType || ''
+                                })
+                            });
+                            const data = await response.json();
+                            setExplanation(data.explanation || 'No explanation available.');
+                        } catch (e) {
+                            setExplanation('Failed to get explanation: ' + e.message);
+                        } finally {
+                            setExplainLoading(false);
+                        }
+                    }, [selectedAgent]);
 
                     const fetchData = useCallback(async () => {
                         try {
@@ -964,7 +1221,7 @@ final class HTTPServer: @unchecked Sendable {
 
                             {/* Main */}
                             <main className="container max-w-screen-xl mx-auto px-4 py-6">
-                                <BuildView build={displayBuild} />
+                                <BuildView build={displayBuild} onExplain={handleExplain} hasAgent={!!selectedAgent} />
 
                                 {/* Build History */}
                                 {builds.length > 0 && (
@@ -1007,6 +1264,16 @@ final class HTTPServer: @unchecked Sendable {
                                     </div>
                                 )}
                             </main>
+
+                            {/* Explain Modal */}
+                            <Modal
+                                isOpen={explainModalOpen}
+                                onClose={() => setExplainModalOpen(false)}
+                                title={explainItem ? `Explain: ${explainItem.name}` : 'Explanation'}
+                                isLoading={explainLoading}
+                            >
+                                <p className="whitespace-pre-wrap">{explanation}</p>
+                            </Modal>
                         </div>
                     );
                 }
