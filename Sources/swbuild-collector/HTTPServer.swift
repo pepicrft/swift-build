@@ -873,6 +873,8 @@ final class HTTPServer: @unchecked Sendable {
                                     name: getReadableRuleName(task.ruleInfo, task.type),
                                     targetName: target.name,
                                     color: color,
+                                    status: task.status,
+                                    cached: task.status === 'cached',
                                     start: new Date(task.startTime).getTime(),
                                     end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
                                 });
@@ -938,6 +940,12 @@ final class HTTPServer: @unchecked Sendable {
                         rowLabels.push(row + 1);
                     }
 
+                    // Count cached tasks
+                    var cachedCount = 0;
+                    for (var ci = 0; ci < tasks.length; ci++) {
+                        if (tasks[ci].cached) cachedCount++;
+                    }
+
                     // Find first task index for each target (for legend click)
                     var firstTaskByTarget = {};
                     for (var fi = 0; fi < tasks.length; fi++) {
@@ -978,7 +986,10 @@ final class HTTPServer: @unchecked Sendable {
                         <Card className="mb-6">
                             <CardHeader className="pb-2">
                                 <CardTitle className="text-base">Build Parallelism</CardTitle>
-                                <CardDescription>Peak: {numRows} concurrent tasks</CardDescription>
+                                <CardDescription>
+                                    Peak: {numRows} concurrent tasks
+                                    {cachedCount > 0 && <span className="ml-2">| {cachedCount} cached (striped)</span>}
+                                </CardDescription>
                             </CardHeader>
                             <CardContent>
                                 {/* Legend - scrollable, clickable */}
@@ -1018,24 +1029,32 @@ final class HTTPServer: @unchecked Sendable {
                                             {tasks.map(function(t, idx) {
                                                 var showLabel = t.width > 6;
                                                 var durMs = t.end - t.start;
+                                                var isCached = t.cached;
+                                                var barStyle = {
+                                                    left: t.left + '%',
+                                                    width: t.width + '%',
+                                                    top: t.row * rh + 2,
+                                                    height: rh - 3,
+                                                    minWidth: 2,
+                                                };
+                                                if (isCached) {
+                                                    // Cached: striped pattern with lower opacity
+                                                    barStyle.background = 'repeating-linear-gradient(45deg, ' + t.color.bg + ', ' + t.color.bg + ' 2px, ' + t.color.light + ' 2px, ' + t.color.light + ' 4px)';
+                                                    barStyle.opacity = 0.7;
+                                                } else {
+                                                    barStyle.backgroundColor = t.color.bg;
+                                                }
                                                 return (
                                                     <div
                                                         key={t.id}
                                                         id={'task-bar-' + idx}
                                                         className="absolute rounded-sm overflow-hidden cursor-default hover:brightness-110 transition-all"
-                                                        title={t.name + ' | ' + t.targetName + ' | ' + formatDur(durMs)}
-                                                        style={{
-                                                            left: t.left + '%',
-                                                            width: t.width + '%',
-                                                            top: t.row * rh + 2,
-                                                            height: rh - 3,
-                                                            backgroundColor: t.color.bg,
-                                                            minWidth: 2,
-                                                        }}
+                                                        title={t.name + ' | ' + t.targetName + ' | ' + formatDur(durMs) + (isCached ? ' | CACHED' : '')}
+                                                        style={barStyle}
                                                     >
                                                         {showLabel && (
                                                             <span className="absolute inset-0 flex items-center px-1 text-[8px] font-medium text-white truncate" style={{ textShadow: '0 0 2px rgba(0,0,0,0.5)' }}>
-                                                                {t.name}
+                                                                {isCached ? '⚡ ' : ''}{t.name}
                                                             </span>
                                                         )}
                                                     </div>

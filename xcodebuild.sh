@@ -50,10 +50,24 @@ sleep 0.5  # Give it time to start
 # Open the web UI in the browser
 open "http://localhost:$PORT"
 
-# Run xcodebuild with the custom build service
-echo "Running xcodebuild with Swift Build..."
+# Run xcodebuild with the custom build service and caching enabled
+echo "Running xcodebuild with Swift Build (compilation caching enabled)..."
 echo ""
+
+# Trap to handle interruption and notify collector
+cleanup() {
+    echo ""
+    echo "Build interrupted."
+}
+trap cleanup INT TERM
 
 env XCBBUILDSERVICE_PATH="$BUILD_SERVICE_PATH" \
     SWIFTBUILD_TELEMETRY_SOCKET="$SOCKET_PATH" \
-    /usr/bin/xcrun xcodebuild "$@"
+    /usr/bin/xcrun xcodebuild \
+        COMPILATION_CACHE_ENABLE_CACHING=YES \
+        COMPILATION_CACHE_ENABLE_PLUGIN=YES \
+        SWIFT_ENABLE_COMPILE_CACHE=YES \
+        SWIFT_ENABLE_EXPLICIT_MODULES=YES \
+        CLANG_ENABLE_COMPILE_CACHE=YES \
+        CLANG_ENABLE_MODULES=YES \
+        "$@"
