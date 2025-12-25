@@ -923,6 +923,11 @@ final class HTTPServer: @unchecked Sendable {
                     var dur = maxT - minT;
                     if (dur <= 0) return null;
 
+                    // Use pixel-based positioning (fixed scale) so bars don't shift when duration extends
+                    var durSec = dur / 1000;
+                    var pxPerSec = 20; // 20 pixels per second
+                    var chartWidth = Math.max(600, durSec * pxPerSec);
+
                     // Sort by start time
                     tasks.sort(function(a, b) { return a.start - b.start; });
 
@@ -942,8 +947,9 @@ final class HTTPServer: @unchecked Sendable {
                             rowEnds.push(0);
                         }
                         t.row = row;
-                        t.left = ((t.start - minT) / dur) * 100;
-                        t.width = Math.max(0.3, ((t.end - t.start) / dur) * 100);
+                        // Pixel-based positioning
+                        t.leftPx = ((t.start - minT) / 1000) * pxPerSec;
+                        t.widthPx = Math.max(3, ((t.end - t.start) / 1000) * pxPerSec);
                         rowEnds[row] = t.end;
                     }
 
@@ -951,15 +957,13 @@ final class HTTPServer: @unchecked Sendable {
                     var rh = 18;
                     var maxRows = 15; // Cap at 15 rows to prevent layout shifts
                     var height = Math.max(50, Math.min(numRows, maxRows) * rh + 32);
-                    var needsScroll = numRows > maxRows;
 
-                    // Time labels
-                    var durSec = dur / 1000;
+                    // Time labels (pixel-based)
                     var interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
                     var labels = [];
                     for (var s = 0; s <= durSec; s += interval) {
                         labels.push({
-                            pct: (s / durSec) * 100,
+                            leftPx: s * pxPerSec,
                             txt: s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60 > 0 ? s%60 + 's' : ''),
                         });
                     }
@@ -1042,9 +1046,9 @@ final class HTTPServer: @unchecked Sendable {
                                         })}
                                     </div>
                                 </div>
-                                {/* Chart with horizontal scroll */}
+                                {/* Chart with horizontal scroll - pixel-based so bars don't shift */}
                                 <div className="overflow-x-auto" ref={scrollRef} onScroll={handleScroll}>
-                                    <div className="flex" style={{ minWidth: Math.max(600, tasks.length * 8) }}>
+                                    <div className="flex" style={{ width: chartWidth + 40 }}>
                                         {/* Y-axis */}
                                         <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground shrink-0" style={{ height: height - 20, paddingTop: 2 }}>
                                             {rowLabels.map(function(r) {
@@ -1053,22 +1057,21 @@ final class HTTPServer: @unchecked Sendable {
                                         </div>
                                         {/* Chart area */}
                                         <div
-                                            className="relative flex-1 bg-secondary/30 rounded overflow-hidden"
-                                            style={{ height: height, minWidth: 500 }}
+                                            className="relative bg-secondary/30 rounded overflow-hidden"
+                                            style={{ height: height, width: chartWidth }}
                                         >
                                             {labels.map(function(l, idx) {
-                                                return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
+                                                return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.leftPx }}></div>;
                                             })}
                                             {tasks.map(function(t, idx) {
-                                                var showLabel = t.width > 6;
+                                                var showLabel = t.widthPx > 80;
                                                 var durMs = t.end - t.start;
                                                 var isCached = t.cached;
                                                 var barStyle = {
-                                                    left: t.left + '%',
-                                                    width: t.width + '%',
+                                                    left: t.leftPx,
+                                                    width: t.widthPx,
                                                     top: t.row * rh + 2,
                                                     height: rh - 3,
-                                                    minWidth: 2,
                                                 };
                                                 if (isCached) {
                                                     // Cached: striped pattern with lower opacity
@@ -1095,7 +1098,7 @@ final class HTTPServer: @unchecked Sendable {
                                             })}
                                             <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
                                                 {labels.map(function(l, idx) {
-                                                    return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                                    return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.leftPx, transform: 'translateX(-50%)' }}>{l.txt}</span>;
                                                 })}
                                             </div>
                                         </div>
