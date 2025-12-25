@@ -1023,7 +1023,7 @@ final class HTTPServer: @unchecked Sendable {
                                                         key={t.id}
                                                         id={'task-bar-' + idx}
                                                         className="absolute rounded-sm overflow-hidden cursor-default hover:brightness-110 transition-all"
-                                                        title={t.name + '\n' + t.targetName + '\n' + formatDur(durMs)}
+                                                        title={t.name + ' | ' + t.targetName + ' | ' + formatDur(durMs)}
                                                         style={{
                                                             left: t.left + '%',
                                                             width: t.width + '%',
