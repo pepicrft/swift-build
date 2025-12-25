@@ -850,34 +850,36 @@ final class HTTPServer: @unchecked Sendable {
                 const ParallelismTimeline = function(props) {
                     const build = props.build;
                     const scrollRef = useRef(null);
-                    const wasAtEndRef = useRef(true);
+                    const userScrolledRef = useRef(false);
+                    const lastScrollLeftRef = useRef(0);
 
-                    // Check if scrolled to end before render
-                    useEffect(function() {
+                    // Save scroll position before updates
+                    var saveScrollPosition = function() {
                         var el = scrollRef.current;
                         if (el) {
-                            var atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 50;
-                            if (wasAtEndRef.current && atEnd === false) {
-                                // User scrolled away from end, don't auto-scroll
-                            } else if (atEnd) {
-                                wasAtEndRef.current = true;
-                            }
+                            lastScrollLeftRef.current = el.scrollLeft;
                         }
-                    });
+                    };
 
-                    // Auto-scroll to end only if was at end
+                    // Restore scroll position after render (unless user is following the end)
                     useEffect(function() {
                         var el = scrollRef.current;
-                        if (el && wasAtEndRef.current) {
-                            el.scrollLeft = el.scrollWidth;
-                        }
-                    }, [build]);
+                        if (!el) return;
 
-                    // Track when user scrolls
+                        if (userScrolledRef.current) {
+                            // User has scrolled, restore their position
+                            el.scrollLeft = lastScrollLeftRef.current;
+                        }
+                        // If user hasn't scrolled yet, don't force any scroll position
+                    });
+
+                    // Track when user manually scrolls
                     var handleScroll = function() {
                         var el = scrollRef.current;
                         if (el) {
-                            wasAtEndRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 50;
+                            // Mark that user has interacted with scroll
+                            userScrolledRef.current = true;
+                            lastScrollLeftRef.current = el.scrollLeft;
                         }
                     };
 
