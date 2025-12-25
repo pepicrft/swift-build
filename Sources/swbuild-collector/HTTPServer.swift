@@ -846,8 +846,8 @@ final class HTTPServer: @unchecked Sendable {
 
                 // Parallelism Timeline Component (like Xcode Build Timeline)
                 const ParallelismTimeline = ({ build }) => {
-                    const [hoveredTask, setHoveredTask] = useState(null);
-                    const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+                    const [hoveredTaskIndex, setHoveredTaskIndex] = useState(-1);
+                    const containerRef = React.useRef(null);
 
                     const timelineData = useMemo(() => {
                         if (!build || !build.targets) return null;
@@ -910,6 +910,23 @@ final class HTTPServer: @unchecked Sendable {
                             rows[assignedRow].push(task);
                         });
 
+                        // Generate time axis labels
+                        const durationSec = duration / 1000;
+                        let interval;
+                        if (durationSec < 10) interval = 1;
+                        else if (durationSec < 60) interval = 5;
+                        else if (durationSec < 300) interval = 30;
+                        else interval = 60;
+
+                        const timeLabels = [];
+                        for (let t = 0; t <= durationSec; t += interval) {
+                            timeLabels.push({
+                                time: t,
+                                percent: (t / durationSec) * 100,
+                                label: t < 60 ? t + 's' : Math.floor(t/60) + 'm' + (t%60 > 0 ? (t%60) + 's' : ''),
+                            });
+                        }
+
                         return {
                             tasks: allTasks,
                             targetColorMap,
@@ -918,40 +935,16 @@ final class HTTPServer: @unchecked Sendable {
                             duration,
                             rowCount: rows.length,
                             maxParallelism: rows.length,
+                            timeLabels,
                         };
                     }, [build]);
 
                     if (!timelineData) return null;
 
-                    const { tasks, targetColorMap, minTime, duration, rowCount } = timelineData;
+                    const { tasks, targetColorMap, minTime, duration, rowCount, timeLabels } = timelineData;
                     const rowHeight = 20;
-                    const timelineHeight = rowCount * rowHeight + 40; // Extra space for time axis
-
-                    const handleMouseMove = (e, task) => {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-                        setHoveredTask(task);
-                    };
-
-                    // Generate time axis labels
-                    const timeLabels = useMemo(() => {
-                        const labels = [];
-                        const durationSec = duration / 1000;
-                        let interval;
-                        if (durationSec < 10) interval = 1;
-                        else if (durationSec < 60) interval = 5;
-                        else if (durationSec < 300) interval = 30;
-                        else interval = 60;
-
-                        for (let t = 0; t <= durationSec; t += interval) {
-                            labels.push({
-                                time: t,
-                                percent: (t / durationSec) * 100,
-                                label: t < 60 ? `${t}s` : `${Math.floor(t/60)}m${t%60 > 0 ? (t%60)+'s' : ''}`,
-                            });
-                        }
-                        return labels;
-                    }, [duration]);
+                    const timelineHeight = Math.max(60, rowCount * rowHeight + 40);
+                    const hoveredTask = hoveredTaskIndex >= 0 ? tasks[hoveredTaskIndex] : null;
 
                     return (
                         <Card className="mb-6">
@@ -981,16 +974,17 @@ final class HTTPServer: @unchecked Sendable {
 
                                 {/* Timeline */}
                                 <div
+                                    ref={containerRef}
                                     className="relative bg-secondary/30 rounded-lg overflow-hidden"
                                     style={{ height: timelineHeight }}
-                                    onMouseLeave={() => setHoveredTask(null)}
+                                    onMouseLeave={() => setHoveredTaskIndex(-1)}
                                 >
                                     {/* Time axis grid lines */}
-                                    {timeLabels.map(({ percent }, i) => (
+                                    {timeLabels.map((item, i) => (
                                         <div
-                                            key={i}
+                                            key={'grid-' + i}
                                             className="absolute top-0 bottom-6 w-px bg-border/50"
-                                            style={{ left: `${percent}%` }}
+                                            style={{ left: item.percent + '%' }}
                                         />
                                     ))}
 
@@ -1002,50 +996,45 @@ final class HTTPServer: @unchecked Sendable {
 
                                         return (
                                             <div
-                                                key={task.signature || i}
-                                                className="absolute rounded-sm cursor-pointer transition-opacity hover:opacity-80"
+                                                key={'task-' + i}
+                                                className="absolute rounded-sm cursor-pointer hover:brightness-110"
                                                 style={{
-                                                    left: `${left}%`,
-                                                    width: `${width}%`,
+                                                    left: left + '%',
+                                                    width: width + '%',
                                                     top: top,
                                                     height: rowHeight - 4,
                                                     backgroundColor: task.color.bg,
                                                     minWidth: 2,
                                                 }}
-                                                onMouseMove={(e) => handleMouseMove(e, task)}
-                                                onMouseLeave={() => setHoveredTask(null)}
+                                                onMouseEnter={() => setHoveredTaskIndex(i)}
                                             />
                                         );
                                     })}
 
                                     {/* Time axis labels */}
                                     <div className="absolute bottom-0 left-0 right-0 h-6 flex items-center border-t border-border/50">
-                                        {timeLabels.map(({ percent, label }, i) => (
+                                        {timeLabels.map((item, i) => (
                                             <span
-                                                key={i}
-                                                className="absolute text-[10px] text-muted-foreground transform -translate-x-1/2"
-                                                style={{ left: `${percent}%` }}
+                                                key={'label-' + i}
+                                                className="absolute text-[10px] text-muted-foreground"
+                                                style={{ left: item.percent + '%', transform: 'translateX(-50%)' }}
                                             >
-                                                {label}
+                                                {item.label}
                                             </span>
                                         ))}
                                     </div>
 
                                     {/* Tooltip */}
                                     {hoveredTask && (
-                                        <div
-                                            className="absolute z-10 bg-popover border border-border rounded-md shadow-lg p-2 text-xs pointer-events-none max-w-xs"
-                                            style={{
-                                                left: Math.min(tooltipPos.x + 10, 300),
-                                                top: Math.max(0, tooltipPos.y - 60),
-                                            }}
+                                        <div className="absolute z-10 bg-popover border border-border rounded-md shadow-lg p-2 text-xs pointer-events-none"
+                                            style={{ right: 8, top: 8, maxWidth: 250 }}
                                         >
                                             <div className="font-medium text-foreground truncate">
                                                 {getReadableRuleName(hoveredTask.ruleInfo, hoveredTask.type)}
                                             </div>
-                                            <div className="text-muted-foreground mt-1">
-                                                <span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ backgroundColor: hoveredTask.color.bg }} />
-                                                {hoveredTask.targetName}
+                                            <div className="text-muted-foreground mt-1 flex items-center gap-1">
+                                                <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: hoveredTask.color.bg }} />
+                                                <span className="truncate">{hoveredTask.targetName}</span>
                                             </div>
                                             <div className="text-muted-foreground">
                                                 Duration: {formatDuration((hoveredTask.endMs - hoveredTask.startMs) / 1000)}
