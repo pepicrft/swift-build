@@ -617,7 +617,8 @@ final class HTTPServer: @unchecked Sendable {
                         if (ruleName === 'SwiftDriver') {
                             // Format: SwiftDriver ModuleName normal arm64 ...
                             if (parts[1] && !parts[1].includes('/')) {
-                                return `${readableName}: ${parts[1]}`;
+                                const moduleName = parts[1].replace(/[\\\\]+$/, '');
+                                return `${readableName}: ${moduleName}`;
                             }
                         }
                         // Special handling for SwiftEmitModule
@@ -757,11 +758,29 @@ final class HTTPServer: @unchecked Sendable {
                     <div className={`p-4 pt-0 ${className}`}>{children}</div>
                 );
 
+                // Simple markdown to HTML converter
+                const renderMarkdown = (text) => {
+                    if (!text) return '';
+                    return text
+                        // Bold: **text** or __text__
+                        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
+                        .replace(/__(.+?)__/g, '<strong>$1</strong>')
+                        // Italic: *text* or _text_
+                        .replace(/\\*([^*]+)\\*/g, '<em>$1</em>')
+                        .replace(/_([^_]+)_/g, '<em>$1</em>')
+                        // Code: `text`
+                        .replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-black/10 text-xs">$1</code>')
+                        // Line breaks
+                        .replace(/\\n/g, '<br/>');
+                };
+
                 // Collapsible Task Detail
                 const TaskDetail = ({ task, isExpanded, explanation, isLoadingExplanation, onRequestExplain, hasAgent }) => {
                     if (!isExpanded) return null;
                     const ruleInfo = task.ruleInfo || '';
-                    const filePath = ruleInfo.includes('/') ? ruleInfo.split(' ').find(s => s.includes('/')) : null;
+                    const rawFilePath = ruleInfo.includes('/') ? ruleInfo.split(' ').find(s => s.includes('/')) : null;
+                    // Clean up file path - remove trailing backslashes from escaped spaces
+                    const filePath = rawFilePath ? rawFilePath.replace(/[\\\\]+$/, '') : null;
 
                     return (
                         <div className="mt-2 p-3 rounded-md bg-secondary text-xs space-y-2 font-mono overflow-hidden">
@@ -774,13 +793,13 @@ final class HTTPServer: @unchecked Sendable {
                             {ruleInfo && (
                                 <div className="flex gap-2">
                                     <span className="text-muted-foreground shrink-0">Rule:</span>
-                                    <span className="text-foreground break-all">{ruleInfo.split(' ')[0]}</span>
+                                    <span className="text-foreground break-all">{ruleInfo.split(' ')[0].replace(/[\\\\]+$/, '')}</span>
                                 </div>
                             )}
                             {filePath && (
                                 <div className="flex gap-2">
                                     <span className="text-muted-foreground shrink-0">File:</span>
-                                    <span className="text-blue-600 break-all">{filePath.split('/').slice(-2).join('/')}</span>
+                                    <span className="text-blue-600 break-all">{filePath.split('/').slice(-2).join('/').replace(/[\\\\]+$/, '')}</span>
                                 </div>
                             )}
                             {task.startTime && (
@@ -811,10 +830,9 @@ final class HTTPServer: @unchecked Sendable {
                             {hasAgent && (
                                 <div className="pt-2 mt-2 border-t border-border/50">
                                     {explanation ? (
-                                        <div className="flex gap-2">
-                                            <span className="text-primary shrink-0">AI:</span>
-                                            <span className="text-foreground font-sans whitespace-pre-wrap">{explanation}</span>
-                                        </div>
+                                        <div className="pl-3 border-l-2 border-primary/50 font-sans text-foreground"
+                                            dangerouslySetInnerHTML={{ __html: renderMarkdown(explanation) }}
+                                        />
                                     ) : isLoadingExplanation ? (
                                         <div className="flex items-center gap-2 text-muted-foreground">
                                             <Loader className="h-3 w-3" />
@@ -1071,10 +1089,9 @@ final class HTTPServer: @unchecked Sendable {
                                                 {hasAgent && (
                                                     <div className="mb-3 pb-3 border-b border-border/50 text-xs">
                                                         {explanation ? (
-                                                            <div className="flex gap-2">
-                                                                <span className="text-primary shrink-0 font-medium">AI:</span>
-                                                                <span className="text-foreground whitespace-pre-wrap">{explanation}</span>
-                                                            </div>
+                                                            <div className="pl-3 border-l-2 border-primary/50 text-foreground"
+                                                                dangerouslySetInnerHTML={{ __html: renderMarkdown(explanation) }}
+                                                            />
                                                         ) : isLoadingExplanation ? (
                                                             <div className="flex items-center gap-2 text-muted-foreground">
                                                                 <Loader className="h-3 w-3" />
