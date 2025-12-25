@@ -793,8 +793,10 @@ final class HTTPServer: @unchecked Sendable {
                         succeeded: { variant: 'success', icon: CheckCircle, label: 'Succeeded' },
                         failed: { variant: 'destructive', icon: XCircle, label: 'Failed' },
                         cancelled: { variant: 'secondary', icon: XCircle, label: 'Cancelled' },
+                        pending: { variant: 'secondary', icon: Clock, label: 'Pending' },
+                        cached: { variant: 'outline', icon: CheckCircle, label: 'Cached' },
                     };
-                    const { variant, icon: Icon, label } = config[status] || config.cancelled;
+                    const { variant, icon: Icon, label } = config[status] || config.pending;
                     const sizeClass = size === 'sm' ? 'text-[10px] px-1.5 py-0' : '';
                     return (
                         <Badge variant={variant} className={`gap-1 ${status === 'running' ? 'animate-pulse-slow' : ''} ${sizeClass}`}>
@@ -929,6 +931,13 @@ final class HTTPServer: @unchecked Sendable {
                     var legends = colorKeys.slice(0, 6);
                     var moreCount = colorKeys.length > 6 ? colorKeys.length - 6 : 0;
 
+                    // Create Y-axis row labels (show every row or every other for many rows)
+                    var rowLabels = [];
+                    var rowStep = numRows > 10 ? 2 : 1;
+                    for (var row = 0; row < numRows; row += rowStep) {
+                        rowLabels.push(row + 1);
+                    }
+
                     return (
                         <Card className="mb-6">
                             <CardHeader className="pb-2">
@@ -949,34 +958,43 @@ final class HTTPServer: @unchecked Sendable {
                                         <span className="text-muted-foreground">+{moreCount} more</span>
                                     )}
                                 </div>
-                                <div
-                                    className="relative bg-secondary/30 rounded overflow-hidden"
-                                    style={{ height: height }}
-                                >
-                                    {labels.map(function(l, idx) {
-                                        return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
-                                    })}
-                                    {tasks.map(function(t) {
-                                        return (
-                                            <div
-                                                key={t.id}
-                                                className="absolute rounded-sm"
-                                                title={t.name + ' (' + t.targetName + ')'}
-                                                style={{
-                                                    left: t.left + '%',
-                                                    width: t.width + '%',
-                                                    top: t.row * rh + 2,
-                                                    height: rh - 3,
-                                                    backgroundColor: t.color.bg,
-                                                    minWidth: 2,
-                                                }}
-                                            ></div>
-                                        );
-                                    })}
-                                    <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
-                                        {labels.map(function(l, idx) {
-                                            return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                <div className="flex">
+                                    {/* Y-axis */}
+                                    <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground" style={{ height: height - 20, paddingTop: 2 }}>
+                                        {rowLabels.map(function(r) {
+                                            return <span key={r} className="leading-none">{r}</span>;
                                         })}
+                                    </div>
+                                    {/* Chart area */}
+                                    <div
+                                        className="relative flex-1 bg-secondary/30 rounded overflow-hidden"
+                                        style={{ height: height }}
+                                    >
+                                        {labels.map(function(l, idx) {
+                                            return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
+                                        })}
+                                        {tasks.map(function(t) {
+                                            return (
+                                                <div
+                                                    key={t.id}
+                                                    className="absolute rounded-sm"
+                                                    title={t.name + ' (' + t.targetName + ')'}
+                                                    style={{
+                                                        left: t.left + '%',
+                                                        width: t.width + '%',
+                                                        top: t.row * rh + 2,
+                                                        height: rh - 3,
+                                                        backgroundColor: t.color.bg,
+                                                        minWidth: 2,
+                                                    }}
+                                                ></div>
+                                            );
+                                        })}
+                                        <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
+                                            {labels.map(function(l, idx) {
+                                                return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                            })}
+                                        </div>
                                     </div>
                                 </div>
                             </CardContent>
