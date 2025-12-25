@@ -846,199 +846,151 @@ final class HTTPServer: @unchecked Sendable {
 
                 // Parallelism Timeline Component (like Xcode Build Timeline)
                 const ParallelismTimeline = ({ build }) => {
-                    const [hoveredTaskIndex, setHoveredTaskIndex] = useState(-1);
-                    const containerRef = React.useRef(null);
+                    const [hoveredIdx, setHoveredIdx] = useState(null);
 
-                    const timelineData = useMemo(() => {
-                        if (!build || !build.targets) return null;
+                    // Process build data into timeline format
+                    const data = useMemo(() => {
+                        if (!build || !build.targets || build.targets.length === 0) return null;
 
-                        // Collect all tasks with their target info
-                        const allTasks = [];
-                        const targetColorMap = {};
-                        let colorIndex = 0;
+                        const tasks = [];
+                        const colors = {};
+                        let ci = 0;
 
-                        build.targets.forEach(target => {
-                            if (!targetColorMap[target.name]) {
-                                targetColorMap[target.name] = TARGET_COLORS[colorIndex % TARGET_COLORS.length];
-                                colorIndex++;
+                        for (let ti = 0; ti < build.targets.length; ti++) {
+                            const target = build.targets[ti];
+                            if (!colors[target.name]) {
+                                colors[target.name] = TARGET_COLORS[ci % TARGET_COLORS.length];
+                                ci++;
                             }
-                            const color = targetColorMap[target.name];
-
-                            (target.tasks || []).forEach(task => {
+                            const color = colors[target.name];
+                            const targetTasks = target.tasks || [];
+                            for (let j = 0; j < targetTasks.length; j++) {
+                                const task = targetTasks[j];
                                 if (task.startTime) {
-                                    allTasks.push({
-                                        ...task,
+                                    tasks.push({
+                                        id: ti + '-' + j,
+                                        name: getReadableRuleName(task.ruleInfo, task.type),
                                         targetName: target.name,
                                         color: color,
-                                        startMs: new Date(task.startTime).getTime(),
-                                        endMs: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
+                                        start: new Date(task.startTime).getTime(),
+                                        end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
                                     });
                                 }
-                            });
-                        });
+                            }
+                        }
 
-                        if (allTasks.length === 0) return null;
+                        if (tasks.length === 0) return null;
 
-                        // Calculate time bounds
-                        const minTime = Math.min(...allTasks.map(t => t.startMs));
-                        const maxTime = Math.max(...allTasks.map(t => t.endMs));
-                        const duration = maxTime - minTime;
+                        const minT = Math.min.apply(null, tasks.map(function(t) { return t.start; }));
+                        const maxT = Math.max.apply(null, tasks.map(function(t) { return t.end; }));
+                        const dur = maxT - minT;
+                        if (dur <= 0) return null;
 
-                        if (duration <= 0) return null;
+                        // Sort by start time
+                        tasks.sort(function(a, b) { return a.start - b.start; });
 
-                        // Sort tasks by start time
-                        allTasks.sort((a, b) => a.startMs - b.startMs);
-
-                        // Assign rows using a greedy algorithm (like interval scheduling)
+                        // Assign rows (greedy interval scheduling)
                         const rows = [];
-                        allTasks.forEach(task => {
-                            // Find the first row where this task fits (doesn't overlap)
-                            let assignedRow = -1;
-                            for (let i = 0; i < rows.length; i++) {
-                                const lastTaskInRow = rows[i][rows[i].length - 1];
-                                if (task.startMs >= lastTaskInRow.endMs) {
-                                    assignedRow = i;
+                        for (let i = 0; i < tasks.length; i++) {
+                            const task = tasks[i];
+                            let row = -1;
+                            for (let r = 0; r < rows.length; r++) {
+                                if (task.start >= rows[r]) {
+                                    row = r;
                                     break;
                                 }
                             }
-                            if (assignedRow === -1) {
-                                // Need a new row
-                                assignedRow = rows.length;
-                                rows.push([]);
+                            if (row === -1) {
+                                row = rows.length;
+                                rows.push(0);
                             }
-                            task.row = assignedRow;
-                            rows[assignedRow].push(task);
-                        });
+                            task.row = row;
+                            task.left = ((task.start - minT) / dur) * 100;
+                            task.width = Math.max(0.3, ((task.end - task.start) / dur) * 100);
+                            task.durSec = (task.end - task.start) / 1000;
+                            rows[row] = task.end;
+                        }
 
-                        // Generate time axis labels
-                        const durationSec = duration / 1000;
-                        let interval;
-                        if (durationSec < 10) interval = 1;
-                        else if (durationSec < 60) interval = 5;
-                        else if (durationSec < 300) interval = 30;
-                        else interval = 60;
-
-                        const timeLabels = [];
-                        for (let t = 0; t <= durationSec; t += interval) {
-                            timeLabels.push({
-                                time: t,
-                                percent: (t / durationSec) * 100,
-                                label: t < 60 ? t + 's' : Math.floor(t/60) + 'm' + (t%60 > 0 ? (t%60) + 's' : ''),
+                        // Time labels
+                        const durSec = dur / 1000;
+                        const interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
+                        const labels = [];
+                        for (let t = 0; t <= durSec; t += interval) {
+                            labels.push({
+                                pct: (t / durSec) * 100,
+                                txt: t < 60 ? t + 's' : Math.floor(t/60) + 'm' + (t%60 > 0 ? t%60 + 's' : ''),
                             });
                         }
 
-                        return {
-                            tasks: allTasks,
-                            targetColorMap,
-                            minTime,
-                            maxTime,
-                            duration,
-                            rowCount: rows.length,
-                            maxParallelism: rows.length,
-                            timeLabels,
-                        };
+                        return { tasks: tasks, colors: colors, rows: rows.length, labels: labels };
                     }, [build]);
 
-                    if (!timelineData) return null;
+                    if (!data) return null;
 
-                    const { tasks, targetColorMap, minTime, duration, rowCount, timeLabels } = timelineData;
-                    const rowHeight = 20;
-                    const timelineHeight = Math.max(60, rowCount * rowHeight + 40);
-                    const hoveredTask = hoveredTaskIndex >= 0 ? tasks[hoveredTaskIndex] : null;
+                    const rh = 18;
+                    const h = Math.max(50, data.rows * rh + 32);
+                    const hovered = hoveredIdx !== null ? data.tasks[hoveredIdx] : null;
+                    const legends = Object.keys(data.colors).slice(0, 6);
 
                     return (
                         <Card className="mb-6">
                             <CardHeader className="pb-2">
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <CardTitle className="text-base">Build Parallelism</CardTitle>
-                                        <CardDescription>
-                                            Peak parallelism: {timelineData.maxParallelism} concurrent tasks
-                                        </CardDescription>
-                                    </div>
-                                </div>
+                                <CardTitle className="text-base">Build Parallelism</CardTitle>
+                                <CardDescription>Peak: {data.rows} concurrent tasks</CardDescription>
                             </CardHeader>
                             <CardContent>
-                                {/* Legend */}
-                                <div className="flex flex-wrap gap-2 mb-3 text-xs">
-                                    {Object.entries(targetColorMap).slice(0, 8).map(([name, color]) => (
-                                        <div key={name} className="flex items-center gap-1">
-                                            <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: color.bg }} />
-                                            <span className="text-muted-foreground truncate max-w-[120px]">{name}</span>
-                                        </div>
-                                    ))}
-                                    {Object.keys(targetColorMap).length > 8 && (
-                                        <span className="text-muted-foreground">+{Object.keys(targetColorMap).length - 8} more</span>
-                                    )}
-                                </div>
-
-                                {/* Timeline */}
-                                <div
-                                    ref={containerRef}
-                                    className="relative bg-secondary/30 rounded-lg overflow-hidden"
-                                    style={{ height: timelineHeight }}
-                                    onMouseLeave={() => setHoveredTaskIndex(-1)}
-                                >
-                                    {/* Time axis grid lines */}
-                                    {timeLabels.map((item, i) => (
-                                        <div
-                                            key={'grid-' + i}
-                                            className="absolute top-0 bottom-6 w-px bg-border/50"
-                                            style={{ left: item.percent + '%' }}
-                                        />
-                                    ))}
-
-                                    {/* Task bars */}
-                                    {tasks.map((task, i) => {
-                                        const left = ((task.startMs - minTime) / duration) * 100;
-                                        const width = Math.max(0.5, ((task.endMs - task.startMs) / duration) * 100);
-                                        const top = task.row * rowHeight + 4;
-
+                                <div className="flex flex-wrap gap-2 mb-2 text-xs">
+                                    {legends.map(function(name) {
                                         return (
-                                            <div
-                                                key={'task-' + i}
-                                                className="absolute rounded-sm cursor-pointer hover:brightness-110"
-                                                style={{
-                                                    left: left + '%',
-                                                    width: width + '%',
-                                                    top: top,
-                                                    height: rowHeight - 4,
-                                                    backgroundColor: task.color.bg,
-                                                    minWidth: 2,
-                                                }}
-                                                onMouseEnter={() => setHoveredTaskIndex(i)}
-                                            />
+                                            <div key={name} className="flex items-center gap-1">
+                                                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: data.colors[name].bg }}></div>
+                                                <span className="text-muted-foreground truncate" style={{ maxWidth: 100 }}>{name}</span>
+                                            </div>
                                         );
                                     })}
-
-                                    {/* Time axis labels */}
-                                    <div className="absolute bottom-0 left-0 right-0 h-6 flex items-center border-t border-border/50">
-                                        {timeLabels.map((item, i) => (
-                                            <span
-                                                key={'label-' + i}
-                                                className="absolute text-[10px] text-muted-foreground"
-                                                style={{ left: item.percent + '%', transform: 'translateX(-50%)' }}
-                                            >
-                                                {item.label}
-                                            </span>
-                                        ))}
+                                    {Object.keys(data.colors).length > 6 && (
+                                        <span className="text-muted-foreground">+{Object.keys(data.colors).length - 6} more</span>
+                                    )}
+                                </div>
+                                <div
+                                    className="relative bg-secondary/30 rounded overflow-hidden"
+                                    style={{ height: h }}
+                                    onMouseLeave={function() { setHoveredIdx(null); }}
+                                >
+                                    {data.labels.map(function(l, i) {
+                                        return <div key={i} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
+                                    })}
+                                    {data.tasks.map(function(t, i) {
+                                        return (
+                                            <div
+                                                key={t.id}
+                                                className="absolute rounded-sm"
+                                                style={{
+                                                    left: t.left + '%',
+                                                    width: t.width + '%',
+                                                    top: t.row * rh + 2,
+                                                    height: rh - 3,
+                                                    backgroundColor: t.color.bg,
+                                                    minWidth: 2,
+                                                    cursor: 'pointer',
+                                                }}
+                                                onMouseEnter={function() { setHoveredIdx(i); }}
+                                            ></div>
+                                        );
+                                    })}
+                                    <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
+                                        {data.labels.map(function(l, i) {
+                                            return <span key={i} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                        })}
                                     </div>
-
-                                    {/* Tooltip */}
-                                    {hoveredTask && (
-                                        <div className="absolute z-10 bg-popover border border-border rounded-md shadow-lg p-2 text-xs pointer-events-none"
-                                            style={{ right: 8, top: 8, maxWidth: 250 }}
-                                        >
-                                            <div className="font-medium text-foreground truncate">
-                                                {getReadableRuleName(hoveredTask.ruleInfo, hoveredTask.type)}
+                                    {hovered && (
+                                        <div className="absolute top-1 right-1 bg-popover border border-border rounded p-1.5 text-xs shadow-md z-10" style={{ maxWidth: 200 }}>
+                                            <div className="font-medium truncate">{hovered.name}</div>
+                                            <div className="text-muted-foreground flex items-center gap-1 mt-0.5">
+                                                <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: hovered.color.bg }}></span>
+                                                <span className="truncate">{hovered.targetName}</span>
                                             </div>
-                                            <div className="text-muted-foreground mt-1 flex items-center gap-1">
-                                                <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: hoveredTask.color.bg }} />
-                                                <span className="truncate">{hoveredTask.targetName}</span>
-                                            </div>
-                                            <div className="text-muted-foreground">
-                                                Duration: {formatDuration((hoveredTask.endMs - hoveredTask.startMs) / 1000)}
-                                            </div>
+                                            <div className="text-muted-foreground">{formatDuration(hovered.durSec)}</div>
                                         </div>
                                     )}
                                 </div>
