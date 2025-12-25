@@ -930,8 +930,6 @@ final class HTTPServer: @unchecked Sendable {
                     }
 
                     var colorKeys = Object.keys(colors);
-                    var legends = colorKeys.slice(0, 6);
-                    var moreCount = colorKeys.length > 6 ? colorKeys.length - 6 : 0;
 
                     // Create Y-axis row labels (show every row or every other for many rows)
                     var rowLabels = [];
@@ -947,55 +945,58 @@ final class HTTPServer: @unchecked Sendable {
                                 <CardDescription>Peak: {numRows} concurrent tasks</CardDescription>
                             </CardHeader>
                             <CardContent>
-                                <div className="flex flex-wrap gap-2 mb-2 text-xs">
-                                    {legends.map(function(name) {
-                                        return (
-                                            <div key={name} className="flex items-center gap-1">
-                                                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: colors[name].bg }}></div>
-                                                <span className="text-muted-foreground truncate" style={{ maxWidth: 100 }}>{name}</span>
-                                            </div>
-                                        );
-                                    })}
-                                    {moreCount > 0 && (
-                                        <span className="text-muted-foreground">+{moreCount} more</span>
-                                    )}
-                                </div>
-                                <div className="flex">
-                                    {/* Y-axis */}
-                                    <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground" style={{ height: height - 20, paddingTop: 2 }}>
-                                        {rowLabels.map(function(r) {
-                                            return <span key={r} className="leading-none">{r}</span>;
-                                        })}
-                                    </div>
-                                    {/* Chart area */}
-                                    <div
-                                        className={'relative flex-1 bg-secondary/30 rounded ' + (needsScroll ? 'overflow-y-auto' : 'overflow-hidden')}
-                                        style={{ height: height }}
-                                    >
-                                        {labels.map(function(l, idx) {
-                                            return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
-                                        })}
-                                        {tasks.map(function(t) {
+                                {/* Legend - scrollable, full names */}
+                                <div className="overflow-x-auto mb-3 pb-1">
+                                    <div className="flex gap-3 text-xs">
+                                        {colorKeys.map(function(name) {
                                             return (
-                                                <div
-                                                    key={t.id}
-                                                    className="absolute rounded-sm"
-                                                    title={t.name + ' (' + t.targetName + ')'}
-                                                    style={{
-                                                        left: t.left + '%',
-                                                        width: t.width + '%',
-                                                        top: t.row * rh + 2,
-                                                        height: rh - 3,
-                                                        backgroundColor: t.color.bg,
-                                                        minWidth: 2,
-                                                    }}
-                                                ></div>
+                                                <div key={name} className="flex items-center gap-1.5 shrink-0">
+                                                    <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: colors[name].bg }}></div>
+                                                    <span className="text-muted-foreground whitespace-nowrap">{name}</span>
+                                                </div>
                                             );
                                         })}
-                                        <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
-                                            {labels.map(function(l, idx) {
-                                                return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                    </div>
+                                </div>
+                                {/* Chart with horizontal scroll */}
+                                <div className="overflow-x-auto">
+                                    <div className="flex" style={{ minWidth: Math.max(600, tasks.length * 8) }}>
+                                        {/* Y-axis */}
+                                        <div className="flex flex-col justify-between pr-2 text-[9px] text-muted-foreground shrink-0" style={{ height: height - 20, paddingTop: 2 }}>
+                                            {rowLabels.map(function(r) {
+                                                return <span key={r} className="leading-none">{r}</span>;
                                             })}
+                                        </div>
+                                        {/* Chart area */}
+                                        <div
+                                            className="relative flex-1 bg-secondary/30 rounded overflow-hidden"
+                                            style={{ height: height, minWidth: 500 }}
+                                        >
+                                            {labels.map(function(l, idx) {
+                                                return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
+                                            })}
+                                            {tasks.map(function(t) {
+                                                return (
+                                                    <div
+                                                        key={t.id}
+                                                        className="absolute rounded-sm"
+                                                        title={t.name + ' (' + t.targetName + ')'}
+                                                        style={{
+                                                            left: t.left + '%',
+                                                            width: t.width + '%',
+                                                            top: t.row * rh + 2,
+                                                            height: rh - 3,
+                                                            backgroundColor: t.color.bg,
+                                                            minWidth: 2,
+                                                        }}
+                                                    ></div>
+                                                );
+                                            })}
+                                            <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
+                                                {labels.map(function(l, idx) {
+                                                    return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                                })}
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
