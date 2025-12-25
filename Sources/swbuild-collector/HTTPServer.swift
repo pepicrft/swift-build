@@ -849,6 +849,7 @@ final class HTTPServer: @unchecked Sendable {
                 // Parallelism Timeline Component (like Xcode Build Timeline)
                 const ParallelismTimeline = function(props) {
                     const build = props.build;
+                    const targetColors = props.targetColors || {};
                     const scrollRef = useRef(null);
                     const userScrolledRef = useRef(false);
                     const lastScrollLeftRef = useRef(0);
@@ -887,16 +888,12 @@ final class HTTPServer: @unchecked Sendable {
                     if (!build || !build.targets || build.targets.length === 0) return null;
 
                     var tasks = [];
-                    var colors = {};
-                    var ci = 0;
+                    // Use colors passed from parent for consistency with target list
+                    var colors = targetColors;
 
                     for (var ti = 0; ti < build.targets.length; ti++) {
                         var target = build.targets[ti];
-                        if (!colors[target.name]) {
-                            colors[target.name] = TARGET_COLORS[ci % TARGET_COLORS.length];
-                            ci++;
-                        }
-                        var color = colors[target.name];
+                        var color = colors[target.name] || TARGET_COLORS[0];
                         var targetTasks = target.tasks || [];
                         for (var j = 0; j < targetTasks.length; j++) {
                             var task = targetTasks[j];
@@ -1295,7 +1292,7 @@ final class HTTPServer: @unchecked Sendable {
                 };
 
                 // Timeline Target Item
-                const TimelineTarget = ({ target, buildStatus, buildStartTime, buildDuration, isFirst, isLast, selectedAgent, hasAgent }) => {
+                const TimelineTarget = ({ target, color, buildStatus, buildStartTime, buildDuration, isFirst, isLast, selectedAgent, hasAgent }) => {
                     const [expanded, setExpanded] = useState(false);
                     const [showAllTasks, setShowAllTasks] = useState(false);
                     const [explanation, setExplanation] = useState(null);
@@ -1394,16 +1391,18 @@ final class HTTPServer: @unchecked Sendable {
                             )}
 
                             <div className="flex gap-3">
-                                {/* Timeline dot */}
+                                {/* Timeline dot with target color */}
                                 <div className="relative flex flex-col items-center">
-                                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                                        effectiveStatus === 'succeeded' ? 'border-emerald-500 bg-emerald-100' :
-                                        effectiveStatus === 'failed' ? 'border-red-500 bg-red-100' :
-                                        effectiveStatus === 'running' ? 'border-blue-500 bg-blue-100' : 'border-border bg-secondary'
-                                    }`}>
-                                        {effectiveStatus === 'succeeded' && <CheckCircle className="h-3 w-3 text-emerald-600" />}
+                                    <div
+                                        className="w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0"
+                                        style={{
+                                            borderColor: color ? color.bg : 'hsl(240 5.9% 90%)',
+                                            backgroundColor: color ? color.light : 'hsl(240 4.8% 95.9%)'
+                                        }}
+                                    >
+                                        {effectiveStatus === 'succeeded' && <CheckCircle className="h-3 w-3" style={{ color: color ? color.bg : 'rgb(16, 185, 129)' }} />}
                                         {effectiveStatus === 'failed' && <XCircle className="h-3 w-3 text-red-600" />}
-                                        {effectiveStatus === 'running' && <Loader className="h-3 w-3 text-blue-600" />}
+                                        {effectiveStatus === 'running' && <Loader className="h-3 w-3" style={{ color: color ? color.bg : 'rgb(59, 130, 246)' }} />}
                                     </div>
                                     {!isLast && (
                                         <div className="w-0.5 flex-1 bg-border mt-1" />
@@ -1450,15 +1449,14 @@ final class HTTPServer: @unchecked Sendable {
                                                     )}
                                                 </div>
 
-                                                {/* Progress bar */}
+                                                {/* Progress bar with target color */}
                                                 <div className="mt-2 h-1.5 bg-secondary rounded-full overflow-hidden">
                                                     <div
-                                                        className={`h-full rounded-full transition-all duration-300 ${
-                                                            effectiveStatus === 'succeeded' ? 'bg-emerald-500' :
-                                                            effectiveStatus === 'failed' ? 'bg-red-500' :
-                                                            effectiveStatus === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-muted-foreground'
-                                                        }`}
-                                                        style={{ width: effectiveStatus === 'running' ? '100%' : (effectiveStatus === 'succeeded' || effectiveStatus === 'failed') ? '100%' : '0%' }}
+                                                        className={`h-full rounded-full transition-all duration-300 ${effectiveStatus === 'running' ? 'animate-pulse' : ''}`}
+                                                        style={{
+                                                            width: effectiveStatus === 'running' ? '100%' : (effectiveStatus === 'succeeded' || effectiveStatus === 'failed') ? '100%' : '0%',
+                                                            backgroundColor: effectiveStatus === 'failed' ? 'rgb(239, 68, 68)' : (color ? color.bg : 'rgb(59, 130, 246)')
+                                                        }}
                                                     />
                                                 </div>
                                             </CardHeader>
@@ -1546,6 +1544,22 @@ final class HTTPServer: @unchecked Sendable {
                         ? (build.completedTaskCount / build.totalTaskCount) * 100
                         : 0;
 
+                    // Compute consistent colors for targets (shared between timeline and target list)
+                    const targetColors = useMemo(() => {
+                        var colors = {};
+                        var ci = 0;
+                        if (build.targets) {
+                            for (var i = 0; i < build.targets.length; i++) {
+                                var name = build.targets[i].name;
+                                if (!colors[name]) {
+                                    colors[name] = TARGET_COLORS[ci % TARGET_COLORS.length];
+                                    ci++;
+                                }
+                            }
+                        }
+                        return colors;
+                    }, [build.targets]);
+
                     // Sort targets: running first, then by start time
                     const sortedTargets = useMemo(() => {
                         if (!build.targets) return [];
@@ -1613,7 +1627,7 @@ final class HTTPServer: @unchecked Sendable {
                             </Card>
 
                             {/* Parallelism Timeline */}
-                            <ParallelismTimeline build={build} />
+                            <ParallelismTimeline build={build} targetColors={targetColors} />
 
                             {/* Target List */}
                             {sortedTargets.length > 0 && (
@@ -1630,6 +1644,7 @@ final class HTTPServer: @unchecked Sendable {
                                                 <TimelineTarget
                                                     key={target.id || target.name}
                                                     target={target}
+                                                    color={targetColors[target.name]}
                                                     buildStatus={build.status}
                                                     buildStartTime={build.startTime}
                                                     buildDuration={build.durationSeconds}
