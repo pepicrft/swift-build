@@ -864,7 +864,7 @@ final class HTTPServer: @unchecked Sendable {
                             {hasAgent && (
                                 <div className="pt-2 mt-2 border-t border-border/50">
                                     {explanation ? (
-                                        <div className="pl-3 border-l-2 border-primary/50 font-sans text-foreground"
+                                        <div className="pl-3 border-l-2 border-primary/50 font-sans text-foreground overflow-hidden break-words"
                                             dangerouslySetInnerHTML={{ __html: renderMarkdown(explanation) }}
                                         />
                                     ) : isLoadingExplanation ? (
@@ -1123,7 +1123,7 @@ final class HTTPServer: @unchecked Sendable {
                                                 {hasAgent && (
                                                     <div className="mb-3 pb-3 border-b border-border/50 text-xs">
                                                         {explanation ? (
-                                                            <div className="pl-3 border-l-2 border-primary/50 text-foreground"
+                                                            <div className="pl-3 border-l-2 border-primary/50 text-foreground overflow-hidden break-words"
                                                                 dangerouslySetInnerHTML={{ __html: renderMarkdown(explanation) }}
                                                             />
                                                         ) : isLoadingExplanation ? (

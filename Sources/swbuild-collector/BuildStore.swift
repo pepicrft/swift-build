@@ -188,6 +188,28 @@ actor BuildStore {
         build.errorCount = errorCount
         build.warningCount = warningCount
 
+        // Finalize any targets and tasks that are still running
+        // This happens when build completes without explicit target/task completion events
+        let finalStatus = result == "failed" ? "failed" : "succeeded"
+        for target in build.targets.values {
+            if target.status == "running" {
+                target.status = finalStatus
+                target.endTime = Date()
+            }
+            for task in target.tasks {
+                if task.status == "running" {
+                    task.status = finalStatus
+                    task.endTime = Date()
+                }
+            }
+        }
+        for task in build.tasksBySignature.values {
+            if task.status == "running" {
+                task.status = finalStatus
+                task.endTime = Date()
+            }
+        }
+
         // Move to history
         buildHistory.insert(build, at: 0)
         if buildHistory.count > maxHistory {
