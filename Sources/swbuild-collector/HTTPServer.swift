@@ -304,23 +304,59 @@ final class HTTPServer: @unchecked Sendable {
         // Build context from additional info
         let ruleInfo = json["ruleInfo"] as? String ?? ""
         let taskType = json["taskType"] as? String ?? ""
+        let signature = json["signature"] as? String ?? ""
+        let filePaths = json["filePaths"] as? [String] ?? []
+        let taskCount = json["taskCount"] as? Int ?? 0
+        let taskTypes = json["taskTypes"] as? [String] ?? []
+        let directories = json["directories"] as? [String] ?? []
+        let exampleFiles = json["exampleFiles"] as? [String] ?? []
 
-        // Build the prompt
+        // Build the prompt with rich context
         let prompt: String
         if itemType == "task" {
-            prompt = """
+            var context = """
             Explain this Xcode build task in simple terms (2-3 sentences max):
+
             Task: \(itemName)
-            Rule: \(ruleInfo.isEmpty ? "N/A" : ruleInfo)
             Type: \(taskType.isEmpty ? "N/A" : taskType)
+            """
+            if !ruleInfo.isEmpty {
+                context += "\nFull command: \(ruleInfo)"
+            }
+            if !filePaths.isEmpty {
+                context += "\nFile paths involved:\n" + filePaths.map { "  - \($0)" }.joined(separator: "\n")
+            }
+            if !signature.isEmpty && signature.count < 200 {
+                context += "\nSignature: \(signature)"
+            }
+            context += """
+
+            You can use your tools to read these files if needed for more context.
             What does this task do in the context of building an iOS/macOS app?
             """
+            prompt = context
         } else {
-            prompt = """
+            var context = """
             Explain this Xcode build target in simple terms (2-3 sentences max):
+
             Target: \(itemName)
+            Task count: \(taskCount)
+            """
+            if !taskTypes.isEmpty {
+                context += "\nTask types in this target: \(taskTypes.joined(separator: ", "))"
+            }
+            if !directories.isEmpty {
+                context += "\nSource directories:\n" + directories.map { "  - \($0)" }.joined(separator: "\n")
+            }
+            if !exampleFiles.isEmpty {
+                context += "\nExample files:\n" + exampleFiles.map { "  - \($0)" }.joined(separator: "\n")
+            }
+            context += """
+
+            You can use your tools to explore these directories or read files if needed.
             What is this target's purpose in an iOS/macOS project?
             """
+            prompt = context
         }
 
         // Invoke the agent
@@ -870,7 +906,7 @@ final class HTTPServer: @unchecked Sendable {
                                     ) : isLoadingExplanation ? (
                                         <div className="flex items-center gap-2 text-muted-foreground">
                                             <Loader className="h-3 w-3" />
-                                            <span className="font-sans">Asking AI...</span>
+                                            <span className="font-sans">Thinking...</span>
                                         </div>
                                     ) : (
                                         <button
@@ -916,6 +952,11 @@ final class HTTPServer: @unchecked Sendable {
                         setIsLoadingExplanation(true);
 
                         try {
+                            // Extract file paths from ruleInfo for context
+                            const ruleInfo = task.ruleInfo || '';
+                            const pathMatches = ruleInfo.match(/\\/[^\\s]+/g) || [];
+                            const filePaths = pathMatches.map(p => removeTrailingBS(p)).filter(p => p.length > 1);
+
                             const response = await fetch('/api/explain', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
@@ -923,8 +964,10 @@ final class HTTPServer: @unchecked Sendable {
                                     agentId: selectedAgent,
                                     type: 'task',
                                     name: readableName,
-                                    ruleInfo: task.ruleInfo || '',
+                                    ruleInfo: ruleInfo,
                                     taskType: task.type || '',
+                                    signature: task.signature || '',
+                                    filePaths: filePaths.slice(0, 5), // Limit to 5 most relevant paths
                                     requestId: newRequestId
                                 })
                             });
@@ -1007,6 +1050,18 @@ final class HTTPServer: @unchecked Sendable {
                         setIsLoadingExplanation(true);
 
                         try {
+                            // Gather context from target's tasks
+                            const tasks = target.tasks || [];
+                            const taskTypes = [...new Set(tasks.map(t => t.type).filter(Boolean))];
+                            const allPaths = tasks.flatMap(t => {
+                                const matches = (t.ruleInfo || '').match(/\\/[^\\s]+/g) || [];
+                                return matches.map(p => removeTrailingBS(p));
+                            }).filter(p => p.length > 1);
+                            // Get unique directories from paths
+                            const directories = [...new Set(allPaths.map(p => p.split('/').slice(0, -1).join('/')))].slice(0, 3);
+                            // Get some example files
+                            const exampleFiles = [...new Set(allPaths)].slice(0, 5);
+
                             const response = await fetch('/api/explain', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
@@ -1014,6 +1069,10 @@ final class HTTPServer: @unchecked Sendable {
                                     agentId: selectedAgent,
                                     type: 'target',
                                     name: target.name,
+                                    taskCount: tasks.length,
+                                    taskTypes: taskTypes.slice(0, 10),
+                                    directories: directories,
+                                    exampleFiles: exampleFiles,
                                     requestId: newRequestId
                                 })
                             });
@@ -1137,7 +1196,7 @@ final class HTTPServer: @unchecked Sendable {
                                                         ) : isLoadingExplanation ? (
                                                             <div className="flex items-center gap-2 text-muted-foreground">
                                                                 <Loader className="h-3 w-3" />
-                                                                <span>Asking AI about this target...</span>
+                                                                <span>Thinking...</span>
                                                             </div>
                                                         ) : (
                                                             <button
