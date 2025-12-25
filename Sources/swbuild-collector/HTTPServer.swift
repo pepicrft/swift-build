@@ -845,126 +845,123 @@ final class HTTPServer: @unchecked Sendable {
                 ];
 
                 // Parallelism Timeline Component (like Xcode Build Timeline)
-                const ParallelismTimeline = ({ build }) => {
-                    const [hoveredIdx, setHoveredIdx] = useState(null);
+                const ParallelismTimeline = function(props) {
+                    const build = props.build;
 
-                    // Process build data into timeline format
-                    const data = useMemo(() => {
-                        if (!build || !build.targets || build.targets.length === 0) return null;
+                    // Process build data into timeline format - simple static computation
+                    if (!build || !build.targets || build.targets.length === 0) return null;
 
-                        const tasks = [];
-                        const colors = {};
-                        let ci = 0;
+                    var tasks = [];
+                    var colors = {};
+                    var ci = 0;
 
-                        for (let ti = 0; ti < build.targets.length; ti++) {
-                            const target = build.targets[ti];
-                            if (!colors[target.name]) {
-                                colors[target.name] = TARGET_COLORS[ci % TARGET_COLORS.length];
-                                ci++;
-                            }
-                            const color = colors[target.name];
-                            const targetTasks = target.tasks || [];
-                            for (let j = 0; j < targetTasks.length; j++) {
-                                const task = targetTasks[j];
-                                if (task.startTime) {
-                                    tasks.push({
-                                        id: ti + '-' + j,
-                                        name: getReadableRuleName(task.ruleInfo, task.type),
-                                        targetName: target.name,
-                                        color: color,
-                                        start: new Date(task.startTime).getTime(),
-                                        end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
-                                    });
-                                }
+                    for (var ti = 0; ti < build.targets.length; ti++) {
+                        var target = build.targets[ti];
+                        if (!colors[target.name]) {
+                            colors[target.name] = TARGET_COLORS[ci % TARGET_COLORS.length];
+                            ci++;
+                        }
+                        var color = colors[target.name];
+                        var targetTasks = target.tasks || [];
+                        for (var j = 0; j < targetTasks.length; j++) {
+                            var task = targetTasks[j];
+                            if (task.startTime) {
+                                tasks.push({
+                                    id: ti + '-' + j,
+                                    name: getReadableRuleName(task.ruleInfo, task.type),
+                                    targetName: target.name,
+                                    color: color,
+                                    start: new Date(task.startTime).getTime(),
+                                    end: task.endTime ? new Date(task.endTime).getTime() : Date.now(),
+                                });
                             }
                         }
+                    }
 
-                        if (tasks.length === 0) return null;
+                    if (tasks.length === 0) return null;
 
-                        const minT = Math.min.apply(null, tasks.map(function(t) { return t.start; }));
-                        const maxT = Math.max.apply(null, tasks.map(function(t) { return t.end; }));
-                        const dur = maxT - minT;
-                        if (dur <= 0) return null;
+                    var timestamps = tasks.map(function(t) { return t.start; }).concat(tasks.map(function(t) { return t.end; }));
+                    var minT = Math.min.apply(null, timestamps);
+                    var maxT = Math.max.apply(null, timestamps);
+                    var dur = maxT - minT;
+                    if (dur <= 0) return null;
 
-                        // Sort by start time
-                        tasks.sort(function(a, b) { return a.start - b.start; });
+                    // Sort by start time
+                    tasks.sort(function(a, b) { return a.start - b.start; });
 
-                        // Assign rows (greedy interval scheduling)
-                        const rows = [];
-                        for (let i = 0; i < tasks.length; i++) {
-                            const task = tasks[i];
-                            let row = -1;
-                            for (let r = 0; r < rows.length; r++) {
-                                if (task.start >= rows[r]) {
-                                    row = r;
-                                    break;
-                                }
+                    // Assign rows (greedy interval scheduling)
+                    var rowEnds = [];
+                    for (var i = 0; i < tasks.length; i++) {
+                        var t = tasks[i];
+                        var row = -1;
+                        for (var r = 0; r < rowEnds.length; r++) {
+                            if (t.start >= rowEnds[r]) {
+                                row = r;
+                                break;
                             }
-                            if (row === -1) {
-                                row = rows.length;
-                                rows.push(0);
-                            }
-                            task.row = row;
-                            task.left = ((task.start - minT) / dur) * 100;
-                            task.width = Math.max(0.3, ((task.end - task.start) / dur) * 100);
-                            task.durSec = (task.end - task.start) / 1000;
-                            rows[row] = task.end;
                         }
-
-                        // Time labels
-                        const durSec = dur / 1000;
-                        const interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
-                        const labels = [];
-                        for (let t = 0; t <= durSec; t += interval) {
-                            labels.push({
-                                pct: (t / durSec) * 100,
-                                txt: t < 60 ? t + 's' : Math.floor(t/60) + 'm' + (t%60 > 0 ? t%60 + 's' : ''),
-                            });
+                        if (row === -1) {
+                            row = rowEnds.length;
+                            rowEnds.push(0);
                         }
+                        t.row = row;
+                        t.left = ((t.start - minT) / dur) * 100;
+                        t.width = Math.max(0.3, ((t.end - t.start) / dur) * 100);
+                        rowEnds[row] = t.end;
+                    }
 
-                        return { tasks: tasks, colors: colors, rows: rows.length, labels: labels };
-                    }, [build]);
+                    var numRows = rowEnds.length;
+                    var rh = 18;
+                    var height = Math.max(50, numRows * rh + 32);
 
-                    if (!data) return null;
+                    // Time labels
+                    var durSec = dur / 1000;
+                    var interval = durSec < 10 ? 1 : durSec < 60 ? 5 : durSec < 300 ? 30 : 60;
+                    var labels = [];
+                    for (var s = 0; s <= durSec; s += interval) {
+                        labels.push({
+                            pct: (s / durSec) * 100,
+                            txt: s < 60 ? s + 's' : Math.floor(s/60) + 'm' + (s%60 > 0 ? s%60 + 's' : ''),
+                        });
+                    }
 
-                    const rh = 18;
-                    const h = Math.max(50, data.rows * rh + 32);
-                    const hovered = hoveredIdx !== null ? data.tasks[hoveredIdx] : null;
-                    const legends = Object.keys(data.colors).slice(0, 6);
+                    var colorKeys = Object.keys(colors);
+                    var legends = colorKeys.slice(0, 6);
+                    var moreCount = colorKeys.length > 6 ? colorKeys.length - 6 : 0;
 
                     return (
                         <Card className="mb-6">
                             <CardHeader className="pb-2">
                                 <CardTitle className="text-base">Build Parallelism</CardTitle>
-                                <CardDescription>Peak: {data.rows} concurrent tasks</CardDescription>
+                                <CardDescription>Peak: {numRows} concurrent tasks</CardDescription>
                             </CardHeader>
                             <CardContent>
                                 <div className="flex flex-wrap gap-2 mb-2 text-xs">
                                     {legends.map(function(name) {
                                         return (
                                             <div key={name} className="flex items-center gap-1">
-                                                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: data.colors[name].bg }}></div>
+                                                <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: colors[name].bg }}></div>
                                                 <span className="text-muted-foreground truncate" style={{ maxWidth: 100 }}>{name}</span>
                                             </div>
                                         );
                                     })}
-                                    {Object.keys(data.colors).length > 6 && (
-                                        <span className="text-muted-foreground">+{Object.keys(data.colors).length - 6} more</span>
+                                    {moreCount > 0 && (
+                                        <span className="text-muted-foreground">+{moreCount} more</span>
                                     )}
                                 </div>
                                 <div
                                     className="relative bg-secondary/30 rounded overflow-hidden"
-                                    style={{ height: h }}
-                                    onMouseLeave={function() { setHoveredIdx(null); }}
+                                    style={{ height: height }}
                                 >
-                                    {data.labels.map(function(l, i) {
-                                        return <div key={i} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
+                                    {labels.map(function(l, idx) {
+                                        return <div key={idx} className="absolute top-0 bottom-5 w-px bg-border/40" style={{ left: l.pct + '%' }}></div>;
                                     })}
-                                    {data.tasks.map(function(t, i) {
+                                    {tasks.map(function(t) {
                                         return (
                                             <div
                                                 key={t.id}
                                                 className="absolute rounded-sm"
+                                                title={t.name + ' (' + t.targetName + ')'}
                                                 style={{
                                                     left: t.left + '%',
                                                     width: t.width + '%',
@@ -972,27 +969,15 @@ final class HTTPServer: @unchecked Sendable {
                                                     height: rh - 3,
                                                     backgroundColor: t.color.bg,
                                                     minWidth: 2,
-                                                    cursor: 'pointer',
                                                 }}
-                                                onMouseEnter={function() { setHoveredIdx(i); }}
                                             ></div>
                                         );
                                     })}
                                     <div className="absolute bottom-0 left-0 right-0 h-5 border-t border-border/40 flex items-center">
-                                        {data.labels.map(function(l, i) {
-                                            return <span key={i} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
+                                        {labels.map(function(l, idx) {
+                                            return <span key={idx} className="absolute text-[9px] text-muted-foreground" style={{ left: l.pct + '%', transform: 'translateX(-50%)' }}>{l.txt}</span>;
                                         })}
                                     </div>
-                                    {hovered && (
-                                        <div className="absolute top-1 right-1 bg-popover border border-border rounded p-1.5 text-xs shadow-md z-10" style={{ maxWidth: 200 }}>
-                                            <div className="font-medium truncate">{hovered.name}</div>
-                                            <div className="text-muted-foreground flex items-center gap-1 mt-0.5">
-                                                <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: hovered.color.bg }}></span>
-                                                <span className="truncate">{hovered.targetName}</span>
-                                            </div>
-                                            <div className="text-muted-foreground">{formatDuration(hovered.durSec)}</div>
-                                        </div>
-                                    )}
                                 </div>
                             </CardContent>
                         </Card>
